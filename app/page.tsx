@@ -8,6 +8,7 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
+  DragEndEvent,
 } from "@dnd-kit/core";
 import {
   arrayMove,
@@ -17,17 +18,21 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-// --- TYPES ---
+/**
+ * TYPES
+ */
 interface FileItem {
   id: string;
   name: string;
   buffer: ArrayBuffer;
 }
+
 interface Stroke {
   points: { x: number; y: number }[];
   color: string;
   width: number;
 }
+
 interface Annotation {
   id: number;
   text: string;
@@ -54,8 +59,9 @@ const PRESET_COLORS = [
   "#86868b",
 ];
 
-// --- SUB-COMPONENTS ---
-
+/**
+ * SIDEBAR SORTABLE ITEM
+ */
 function SortableFileItem({
   file,
   index,
@@ -69,6 +75,7 @@ function SortableFileItem({
 }) {
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id: file.id });
+
   const rowStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -85,6 +92,7 @@ function SortableFileItem({
     color: theme.text,
     boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
   };
+
   return (
     <div ref={setNodeRef} style={rowStyle} {...attributes} {...listeners}>
       <span
@@ -109,6 +117,7 @@ function SortableFileItem({
         {file.name}
       </div>
       <button
+        type="button"
         onMouseDown={(e) => e.stopPropagation()}
         onClick={onRemove}
         style={{
@@ -135,6 +144,9 @@ function SortableFileItem({
   );
 }
 
+/**
+ * PRE-MERGE PREVIEW CARD
+ */
 function PDFPreviewCard({
   file,
   pdfjs,
@@ -144,7 +156,7 @@ function PDFPreviewCard({
   file: FileItem;
   pdfjs: any;
   theme: any;
-  previewRenderTasks: React.MutableRefObject<any>;
+  previewRenderTasks: React.MutableRefObject<{ [key: string]: any }>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -152,15 +164,16 @@ function PDFPreviewCard({
 
   useEffect(() => {
     if (!pdfjs || !file.buffer) return;
+
     const currentRenderId = ++lastRenderId.current;
     let isCancelled = false;
 
     const loadPreview = async () => {
       try {
-        if (previewRenderTasks.current[file.id])
+        if (previewRenderTasks.current[file.id]) {
           previewRenderTasks.current[file.id].cancel();
+        }
 
-        // FIX: Always use a copy of the buffer so the original doesn't detach
         const bufferCopy = file.buffer.slice(0);
         const loadingTask = pdfjs.getDocument({ data: bufferCopy });
         const pdf = await loadingTask.promise;
@@ -169,32 +182,42 @@ function PDFPreviewCard({
           await pdf.destroy();
           return;
         }
+
         setPageCount(pdf.numPages);
         const page = await pdf.getPage(1);
         const viewport = page.getViewport({ scale: 0.4 });
         const canvas = canvasRef.current;
+
         if (canvas) {
           const context = canvas.getContext("2d");
+          if (!context) return;
           canvas.height = viewport.height;
           canvas.width = viewport.width;
+
           if (isCancelled || currentRenderId !== lastRenderId.current) {
             await pdf.destroy();
             return;
           }
+
           const renderTask = page.render({ canvasContext: context, viewport });
           previewRenderTasks.current[file.id] = renderTask;
           await renderTask.promise;
         }
         await pdf.destroy();
       } catch (e: any) {
-        if (e.name !== "RenderingCancelledException") console.error(e);
+        if (e.name !== "RenderingCancelledException") {
+          console.error("Preview render error:", e);
+        }
       }
     };
+
     loadPreview();
+
     return () => {
       isCancelled = true;
-      if (previewRenderTasks.current[file.id])
+      if (previewRenderTasks.current[file.id]) {
         previewRenderTasks.current[file.id].cancel();
+      }
     };
   }, [file.id, file.buffer, pdfjs, previewRenderTasks]);
 
@@ -243,15 +266,18 @@ function PDFPreviewCard({
   );
 }
 
-export default function ApplePDFEditor() {
+/**
+ * MAIN PAGE COMPONENT
+ */
+export default function EditPDFLite() {
   const [mounted, setMounted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [pdfjs, setPdfjs] = useState<any>(null);
   const [pdfDoc, setPdfDoc] = useState<any>(null);
-  const [mergedBytes, setMergedBytes] = useState<ArrayBuffer | null>(null);
+  const [mergedBytes, setMergedBytes] = useState<Uint8Array | null>(null);
   const [totalPages, setTotalPages] = useState(0);
   const [zoom, setZoom] = useState(1.0);
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState<boolean>(false);
 
   const [uploadedFiles, setUploadedFiles] = useState<FileItem[]>([]);
   const [isDrawMode, setIsDrawMode] = useState(false);
@@ -259,6 +285,7 @@ export default function ApplePDFEditor() {
   const [strokeColor, setStrokeColor] = useState("#e02020");
   const [strokeWidth, setStrokeWidth] = useState(3);
   const [isDrawing, setIsDrawing] = useState(false);
+
   const [strokes, setStrokes] = useState<{ [page: number]: Stroke[] }>({});
   const [annotations, setAnnotations] = useState<{
     [page: number]: Annotation[];
@@ -276,6 +303,7 @@ export default function ApplePDFEditor() {
   );
   const renderTasks = useRef<{ [key: number]: any }>({});
   const previewRenderTasks = useRef<{ [key: string]: any }>({});
+
   const sensors = useSensors(useSensor(PointerSensor));
 
   const selectedNote = selectedId
@@ -284,11 +312,13 @@ export default function ApplePDFEditor() {
 
   useEffect(() => {
     setMounted(true);
-    const saved = localStorage.getItem("pdf-studio-theme");
-    if (saved === "dark") setDarkMode(true);
-    import("pdfjs-dist").then((pdflib) => {
-      const pdfjsLib = require("pdfjs-dist");
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+    if (typeof window !== "undefined") {
+      const savedTheme = localStorage.getItem("pdf-studio-theme");
+      if (savedTheme === "dark") setDarkMode(true);
+    }
+
+    import("pdfjs-dist").then((pdfjsLib) => {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
       setPdfjs(pdfjsLib);
     });
   }, []);
@@ -296,7 +326,9 @@ export default function ApplePDFEditor() {
   const toggleDarkMode = () => {
     const nextMode = !darkMode;
     setDarkMode(nextMode);
-    localStorage.setItem("pdf-studio-theme", nextMode ? "dark" : "light");
+    if (typeof window !== "undefined") {
+      localStorage.setItem("pdf-studio-theme", nextMode ? "dark" : "light");
+    }
   };
 
   const redrawStrokes = useCallback(
@@ -327,26 +359,35 @@ export default function ApplePDFEditor() {
       if (!pdf) return;
       setLoading(true);
       for (let i = 1; i <= pdf.numPages; i++) {
-        if (renderTasks.current[i]) renderTasks.current[i].cancel();
-        const page = await pdf.getPage(i);
-        const viewport = page.getViewport({ scale });
-        const canvas = canvasRefs.current[i];
-        if (canvas) {
-          const ctx = canvas.getContext("2d");
-          canvas.height = viewport.height;
-          canvas.width = viewport.width;
-          const renderTask = page.render({ canvasContext: ctx, viewport });
-          renderTasks.current[i] = renderTask;
-          try {
-            await renderTask.promise;
-          } catch (e: any) {
-            if (e.name !== "RenderingCancelledException") console.error(e);
-          }
+        if (renderTasks.current[i]) {
+          renderTasks.current[i].cancel();
         }
-        if (drawCanvasRefs.current[i]) {
-          drawCanvasRefs.current[i]!.height = viewport.height;
-          drawCanvasRefs.current[i]!.width = viewport.width;
-          redrawStrokes(i);
+
+        try {
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale });
+          const canvas = canvasRefs.current[i];
+
+          if (canvas) {
+            const ctx = canvas.getContext("2d");
+            if (!ctx) continue;
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            const renderTask = page.render({ canvasContext: ctx, viewport });
+            renderTasks.current[i] = renderTask;
+            await renderTask.promise;
+          }
+
+          if (drawCanvasRefs.current[i]) {
+            drawCanvasRefs.current[i]!.height = viewport.height;
+            drawCanvasRefs.current[i]!.width = viewport.width;
+            redrawStrokes(i);
+          }
+        } catch (e: any) {
+          if (e.name !== "RenderingCancelledException") {
+            console.error(`Page ${i} render error:`, e);
+          }
         }
       }
       setLoading(false);
@@ -367,18 +408,19 @@ export default function ApplePDFEditor() {
     try {
       const mergedPdf = await PDFDocument.create();
       for (const file of uploadedFiles) {
-        // FIX: Always slice the buffer when loading so the state original is preserved
         const src = await PDFDocument.load(file.buffer.slice(0));
         const copied = await mergedPdf.copyPages(src, src.getPageIndices());
         copied.forEach((p) => mergedPdf.addPage(p));
       }
       const bytes = await mergedPdf.save();
       setMergedBytes(bytes);
+
       const pdf = await pdfjs.getDocument({ data: bytes.slice(0) }).promise;
       setPdfDoc(pdf);
       setTotalPages(pdf.numPages);
     } catch (e) {
-      alert("Merge error");
+      console.error("Merge error:", e);
+      alert("Error merging documents.");
     } finally {
       setLoading(false);
     }
@@ -402,11 +444,12 @@ export default function ApplePDFEditor() {
     const note = annotations[selectedId.page]?.find(
       (n) => n.id === selectedId.id,
     );
-    if (note)
+    if (note) {
       updateNote(selectedId.page, selectedId.id, {
         x: note.x + dx,
         y: note.y + dy,
       });
+    }
   };
 
   const undoDraw = (pageNum: number) => {
@@ -420,57 +463,98 @@ export default function ApplePDFEditor() {
   const downloadPDF = async () => {
     if (!mergedBytes) return;
     setLoading(true);
-    // FIX: Slice mergedBytes so it doesn't detach during the load
-    const pdfLibDoc = await PDFDocument.load(mergedBytes.slice(0));
-    const pages = pdfLibDoc.getPages();
-    const hexToRgb = (hex: string) => {
-      const r = parseInt(hex.slice(1, 3), 16) / 255;
-      const g = parseInt(hex.slice(3, 5), 16) / 255;
-      const b = parseInt(hex.slice(5, 7), 16) / 255;
-      return rgb(r, g, b);
-    };
-    for (let i = 1; i <= totalPages; i++) {
-      const pdfPage = pages[i - 1];
-      const { height: pageHeight } = pdfPage.getSize();
-      (strokes[i] || []).forEach((s) => {
-        for (let j = 0; j < s.points.length - 1; j++) {
-          pdfPage.drawLine({
-            start: { x: s.points[j].x, y: pageHeight - s.points[j].y },
-            end: { x: s.points[j + 1].x, y: pageHeight - s.points[j + 1].y },
-            thickness: s.width,
-            color: hexToRgb(s.color),
-          });
-        }
-      });
-      (annotations[i] || []).forEach((n) => {
-        let fn = n.fontFamily || "Helvetica";
-        if (n.isBold && n.isItalic) fn += "BoldOblique";
-        else if (n.isBold) fn += "Bold";
-        else if (n.isItalic)
-          fn += n.fontFamily === "TimesRoman" ? "Italic" : "Oblique";
-        pdfPage.drawText(n.text, {
-          x: n.x,
-          y: pageHeight - n.y - n.fontSize,
-          size: n.fontSize,
-          font: pdfLibDoc.embedStandardFont(
-            (StandardFonts as any)[fn] || StandardFonts.Helvetica,
-          ),
-          maxWidth: n.width,
-          color: hexToRgb(n.color || "#000000"),
+    try {
+      const pdfLibDoc = await PDFDocument.load(mergedBytes.slice(0));
+      const pages = pdfLibDoc.getPages();
+
+      const hexToRgb = (hex: string) => {
+        const r = parseInt(hex.slice(1, 3), 16) / 255;
+        const g = parseInt(hex.slice(3, 5), 16) / 255;
+        const b = parseInt(hex.slice(5, 7), 16) / 255;
+        return rgb(r, g, b);
+      };
+
+      for (let i = 1; i <= totalPages; i++) {
+        const pdfPage = pages[i - 1];
+        const { height: pageHeight } = pdfPage.getSize();
+
+        (strokes[i] || []).forEach((s) => {
+          for (let j = 0; j < s.points.length - 1; j++) {
+            pdfPage.drawLine({
+              start: { x: s.points[j].x, y: pageHeight - s.points[j].y },
+              end: { x: s.points[j + 1].x, y: pageHeight - s.points[j + 1].y },
+              thickness: s.width,
+              color: hexToRgb(s.color),
+            });
+          }
         });
-      });
+
+        (annotations[i] || []).forEach((n) => {
+          let fontVariant;
+          if (n.isBold && n.isItalic)
+            fontVariant = StandardFonts.HelveticaBoldOblique;
+          else if (n.isBold) fontVariant = StandardFonts.HelveticaBold;
+          else if (n.isItalic)
+            fontVariant =
+              n.fontFamily === "TimesRoman"
+                ? StandardFonts.TimesRomanItalic
+                : StandardFonts.HelveticaOblique;
+          else
+            fontVariant =
+              n.fontFamily === "TimesRoman"
+                ? StandardFonts.TimesRoman
+                : StandardFonts.Helvetica;
+
+          pdfPage.drawText(n.text, {
+            x: n.x,
+            y: pageHeight - n.y - n.fontSize,
+            size: n.fontSize,
+            font: pdfLibDoc.embedStandardFont(fontVariant as any),
+            maxWidth: n.width,
+            color: hexToRgb(n.color || "#000000"),
+          });
+        });
+      }
+
+      const bytes = await pdfLibDoc.save();
+
+      /**
+       * Vercel TypeScript Fix:
+       * Constructing a fresh ArrayBuffer and copying bytes manually
+       * prevents "ArrayBufferLike" to "BlobPart" assignment errors.
+       */
+      const freshBuffer = new ArrayBuffer(bytes.length);
+      const uint8View = new Uint8Array(freshBuffer);
+      uint8View.set(bytes);
+
+      const blob = new Blob([freshBuffer], { type: "application/pdf" });
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = "Edited_Document.pdf";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
+    } catch (err) {
+      console.error("Export failure:", err);
+      alert("Could not export PDF.");
+    } finally {
+      setLoading(false);
     }
-    const bytes = await pdfLibDoc.save();
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(
-      new Blob([bytes], { type: "application/pdf" }),
-    );
-    link.download = "Edited_Document.pdf";
-    link.click();
-    setLoading(false);
   };
 
-  if (!mounted) return null;
+  const onDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      setUploadedFiles((items) => {
+        const oldIndex = items.findIndex((it) => it.id === active.id);
+        const newIndex = items.findIndex((it) => it.id === over.id);
+        return arrayMove(items, oldIndex, newIndex);
+      });
+    }
+  };
 
   const theme = {
     bg: darkMode ? "#1c1c1e" : "#f5f5f7",
@@ -486,7 +570,7 @@ export default function ApplePDFEditor() {
     accent: "#0071e3",
   };
 
-  const toolBtn = (active: boolean) => ({
+  const toolBtnStyle = (active: boolean) => ({
     padding: "6px 14px",
     backgroundColor: active ? theme.accent : "transparent",
     color: active ? "#ffffff" : theme.text,
@@ -498,7 +582,7 @@ export default function ApplePDFEditor() {
     transition: "all 0.15s ease",
   });
 
-  const iconBtn = {
+  const iconBtnBase = {
     padding: "6px",
     background: "none",
     border: "none",
@@ -508,6 +592,7 @@ export default function ApplePDFEditor() {
     display: "flex",
     alignItems: "center",
   };
+
   const ColorSwatch = ({
     color,
     active,
@@ -518,6 +603,7 @@ export default function ApplePDFEditor() {
     onClick: () => void;
   }) => (
     <button
+      type="button"
       onClick={onClick}
       style={{
         width: "20px",
@@ -531,6 +617,8 @@ export default function ApplePDFEditor() {
       }}
     />
   );
+
+  if (!mounted) return null;
 
   return (
     <div
@@ -558,6 +646,7 @@ export default function ApplePDFEditor() {
       >
         <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
           <div style={{ fontWeight: 600, fontSize: "14px" }}>PDF Studio</div>
+
           {pdfDoc && (
             <div
               style={{
@@ -569,32 +658,36 @@ export default function ApplePDFEditor() {
               }}
             >
               <button
+                type="button"
                 onClick={() => {
                   setIsDrawMode(true);
                   setIsAddTextMode(false);
                   setSelectedId(null);
                 }}
-                style={toolBtn(isDrawMode && !isAddTextMode)}
+                style={toolBtnStyle(isDrawMode && !isAddTextMode) as any}
               >
                 Markup
               </button>
               <button
+                type="button"
                 onClick={() => {
                   setIsAddTextMode(true);
                   setIsDrawMode(false);
                   setSelectedId(null);
                 }}
-                style={toolBtn(isAddTextMode)}
+                style={toolBtnStyle(isAddTextMode) as any}
               >
                 Text
               </button>
             </div>
           )}
+
           <input
             type="file"
-            id="up"
+            id="pdf-upload-input"
             multiple
             hidden
+            accept="application/pdf"
             onChange={async (e) => {
               const files = e.target.files;
               if (!files) return;
@@ -610,7 +703,7 @@ export default function ApplePDFEditor() {
               setUploadedFiles((prev) => [...prev, ...items]);
             }}
           />
-          <label htmlFor="up" style={{ ...toolBtn(false), cursor: "pointer" }}>
+          <label htmlFor="pdf-upload-input" style={toolBtnStyle(false) as any}>
             Add Files
           </label>
         </div>
@@ -628,7 +721,8 @@ export default function ApplePDFEditor() {
               }}
             >
               <button
-                style={iconBtn}
+                type="button"
+                style={iconBtnBase as any}
                 onClick={() => setZoom((z) => Math.max(z - 0.1, 0.5))}
               >
                 <svg
@@ -652,7 +746,11 @@ export default function ApplePDFEditor() {
               >
                 {Math.round(zoom * 100)}%
               </span>
-              <button style={iconBtn} onClick={() => setZoom((z) => z + 0.1)}>
+              <button
+                type="button"
+                style={iconBtnBase as any}
+                onClick={() => setZoom((z) => z + 0.1)}
+              >
                 <svg
                   width="16"
                   height="16"
@@ -666,7 +764,12 @@ export default function ApplePDFEditor() {
               </button>
             </div>
           )}
-          <button onClick={toggleDarkMode} style={iconBtn}>
+
+          <button
+            type="button"
+            onClick={toggleDarkMode}
+            style={iconBtnBase as any}
+          >
             {darkMode ? (
               <svg
                 width="18"
@@ -692,10 +795,12 @@ export default function ApplePDFEditor() {
               </svg>
             )}
           </button>
+
           {pdfDoc && (
             <button
+              type="button"
               onClick={downloadPDF}
-              style={{ ...toolBtn(true), border: "none" }}
+              style={toolBtnStyle(true) as any}
             >
               Export PDF
             </button>
@@ -729,17 +834,7 @@ export default function ApplePDFEditor() {
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
-              onDragEnd={(e) => {
-                if (e.active && e.over && e.active.id !== e.over.id) {
-                  const oldI = uploadedFiles.findIndex(
-                    (f) => f.id === e.active.id,
-                  );
-                  const newI = uploadedFiles.findIndex(
-                    (f) => f.id === e.over.id,
-                  );
-                  setUploadedFiles(arrayMove(uploadedFiles, oldI, newI));
-                }
-              }}
+              onDragEnd={onDragEnd}
             >
               <SortableContext
                 items={uploadedFiles.map((f) => f.id)}
@@ -762,8 +857,9 @@ export default function ApplePDFEditor() {
             </DndContext>
           </div>
           <button
+            type="button"
             onClick={mergeAndLoad}
-            disabled={uploadedFiles.length === 0}
+            disabled={uploadedFiles.length === 0 || loading}
             style={{
               width: "100%",
               padding: "12px",
@@ -774,10 +870,12 @@ export default function ApplePDFEditor() {
               borderRadius: "8px",
               fontSize: "13px",
               fontWeight: 600,
-              cursor: uploadedFiles.length > 0 ? "pointer" : "default",
+              cursor:
+                uploadedFiles.length > 0 && !loading ? "pointer" : "default",
+              opacity: loading ? 0.7 : 1,
             }}
           >
-            Merge & Edit
+            {loading ? "Processing..." : "Merge & Edit"}
           </button>
         </aside>
 
@@ -851,6 +949,7 @@ export default function ApplePDFEditor() {
                   </span>
                 </div>
               )}
+
               {selectedNote && (
                 <div
                   style={{ display: "flex", gap: "12px", alignItems: "center" }}
@@ -899,36 +998,42 @@ export default function ApplePDFEditor() {
                     }}
                   >
                     <button
+                      type="button"
                       onClick={() =>
                         updateNote(selectedId!.page, selectedId!.id, {
                           isBold: !selectedNote.isBold,
                         })
                       }
-                      style={{
-                        ...iconBtn,
-                        padding: "4px 10px",
-                        backgroundColor: selectedNote.isBold
-                          ? theme.border
-                          : "transparent",
-                        borderRadius: 0,
-                      }}
+                      style={
+                        {
+                          ...iconBtnBase,
+                          padding: "4px 10px",
+                          backgroundColor: selectedNote.isBold
+                            ? theme.border
+                            : "transparent",
+                          borderRadius: 0,
+                        } as any
+                      }
                     >
                       B
                     </button>
                     <button
+                      type="button"
                       onClick={() =>
                         updateNote(selectedId!.page, selectedId!.id, {
                           isItalic: !selectedNote.isItalic,
                         })
                       }
-                      style={{
-                        ...iconBtn,
-                        padding: "4px 10px",
-                        backgroundColor: selectedNote.isItalic
-                          ? theme.border
-                          : "transparent",
-                        borderRadius: 0,
-                      }}
+                      style={
+                        {
+                          ...iconBtnBase,
+                          padding: "4px 10px",
+                          backgroundColor: selectedNote.isItalic
+                            ? theme.border
+                            : "transparent",
+                          borderRadius: 0,
+                        } as any
+                      }
                     >
                       I
                     </button>
@@ -969,7 +1074,11 @@ export default function ApplePDFEditor() {
                     ))}
                   </div>
                   <div style={{ display: "flex", gap: "2px" }}>
-                    <button onClick={() => nudge(0, -2)} style={iconBtn}>
+                    <button
+                      type="button"
+                      onClick={() => nudge(0, -2)}
+                      style={iconBtnBase as any}
+                    >
                       <svg
                         width="14"
                         height="14"
@@ -981,7 +1090,11 @@ export default function ApplePDFEditor() {
                         <path d="M18 15l-6-6-6 6" />
                       </svg>
                     </button>
-                    <button onClick={() => nudge(0, 2)} style={iconBtn}>
+                    <button
+                      type="button"
+                      onClick={() => nudge(0, 2)}
+                      style={iconBtnBase as any}
+                    >
                       <svg
                         width="14"
                         height="14"
@@ -993,7 +1106,11 @@ export default function ApplePDFEditor() {
                         <path d="M6 9l6 6 6-6" />
                       </svg>
                     </button>
-                    <button onClick={() => nudge(-2, 0)} style={iconBtn}>
+                    <button
+                      type="button"
+                      onClick={() => nudge(-2, 0)}
+                      style={iconBtnBase as any}
+                    >
                       <svg
                         width="14"
                         height="14"
@@ -1005,7 +1122,11 @@ export default function ApplePDFEditor() {
                         <path d="M15 18l-6-6 6-6" />
                       </svg>
                     </button>
-                    <button onClick={() => nudge(2, 0)} style={iconBtn}>
+                    <button
+                      type="button"
+                      onClick={() => nudge(2, 0)}
+                      style={iconBtnBase as any}
+                    >
                       <svg
                         width="14"
                         height="14"
@@ -1019,16 +1140,25 @@ export default function ApplePDFEditor() {
                     </button>
                   </div>
                   <button
+                    type="button"
                     onClick={() => {
-                      setAnnotations((prev) => ({
-                        ...prev,
-                        [selectedId!.page]: prev[selectedId!.page].filter(
-                          (n) => n.id !== selectedId!.id,
-                        ),
-                      }));
-                      setSelectedId(null);
+                      if (selectedId) {
+                        setAnnotations((prev) => ({
+                          ...prev,
+                          [selectedId.page]: prev[selectedId.page].filter(
+                            (n) => n.id !== selectedId.id,
+                          ),
+                        }));
+                        setSelectedId(null);
+                      }
                     }}
-                    style={{ ...iconBtn, color: "#e02020", marginLeft: "4px" }}
+                    style={
+                      {
+                        ...iconBtnBase,
+                        color: "#e02020",
+                        marginLeft: "4px",
+                      } as any
+                    }
                   >
                     <svg
                       width="16"
@@ -1162,11 +1292,12 @@ export default function ApplePDFEditor() {
                           canvasRefs.current[pageNum]!.getBoundingClientRect();
                         setStrokes((prev) => {
                           const pageStrokes = [...(prev[pageNum] || [])];
-                          if (pageStrokes.length > 0)
+                          if (pageStrokes.length > 0) {
                             pageStrokes[pageStrokes.length - 1].points.push({
                               x: (e.clientX - rect.left) / zoom,
                               y: (e.clientY - rect.top) / zoom,
                             });
+                          }
                           return { ...prev, [pageNum]: pageStrokes };
                         });
                         redrawStrokes(pageNum);
@@ -1212,6 +1343,7 @@ export default function ApplePDFEditor() {
                       </span>
                       {isDrawMode && (
                         <button
+                          type="button"
                           onClick={() => undoDraw(pageNum)}
                           disabled={!(strokes[pageNum]?.length > 0)}
                           style={{
@@ -1228,6 +1360,7 @@ export default function ApplePDFEditor() {
                         </button>
                       )}
                     </div>
+
                     <div
                       onMouseDown={(e) => {
                         const rect =
@@ -1285,11 +1418,15 @@ export default function ApplePDFEditor() {
                       }}
                     >
                       <canvas
-                        ref={(el) => (canvasRefs.current[pageNum] = el)}
+                        ref={(el) => {
+                          canvasRefs.current[pageNum] = el;
+                        }}
                         style={{ display: "block" }}
                       />
                       <canvas
-                        ref={(el) => (drawCanvasRefs.current[pageNum] = el)}
+                        ref={(el) => {
+                          drawCanvasRefs.current[pageNum] = el;
+                        }}
                         style={{
                           position: "absolute",
                           top: 0,

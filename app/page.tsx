@@ -48,6 +48,11 @@ interface Annotation {
   isItalic: boolean;
 }
 
+interface EditorState {
+  strokes: { [page: number]: Stroke[] };
+  annotations: { [page: number]: Annotation[] };
+}
+
 const PRESET_COLORS = [
   "#1d1d1f",
   "#ffffff",
@@ -58,6 +63,13 @@ const PRESET_COLORS = [
   "#8e44ad",
   "#86868b",
 ];
+
+/**
+ * UTILS
+ */
+const deepCloneState = (state: EditorState): EditorState => {
+  return JSON.parse(JSON.stringify(state));
+};
 
 /**
  * SIDEBAR SORTABLE ITEM
@@ -164,7 +176,6 @@ function PDFPreviewCard({
 
   useEffect(() => {
     if (!pdfjs || !file.buffer) return;
-
     const currentRenderId = ++lastRenderId.current;
     let isCancelled = false;
 
@@ -173,7 +184,6 @@ function PDFPreviewCard({
         if (previewRenderTasks.current[file.id]) {
           previewRenderTasks.current[file.id].cancel();
         }
-
         const bufferCopy = file.buffer.slice(0);
         const loadingTask = pdfjs.getDocument({ data: bufferCopy });
         const pdf = await loadingTask.promise;
@@ -205,19 +215,14 @@ function PDFPreviewCard({
         }
         await pdf.destroy();
       } catch (e: any) {
-        if (e.name !== "RenderingCancelledException") {
-          console.error("Preview render error:", e);
-        }
+        if (e.name !== "RenderingCancelledException") console.error(e);
       }
     };
-
     loadPreview();
-
     return () => {
       isCancelled = true;
-      if (previewRenderTasks.current[file.id]) {
+      if (previewRenderTasks.current[file.id])
         previewRenderTasks.current[file.id].cancel();
-      }
     };
   }, [file.id, file.buffer, pdfjs, previewRenderTasks]);
 
@@ -290,6 +295,10 @@ export default function EditPDFLite() {
   const [annotations, setAnnotations] = useState<{
     [page: number]: Annotation[];
   }>({});
+
+  const [past, setPast] = useState<EditorState[]>([]);
+  const [future, setFuture] = useState<EditorState[]>([]);
+
   const [selectedId, setSelectedId] = useState<{
     id: number;
     page: number;
@@ -303,7 +312,6 @@ export default function EditPDFLite() {
   );
   const renderTasks = useRef<{ [key: number]: any }>({});
   const previewRenderTasks = useRef<{ [key: string]: any }>({});
-
   const sensors = useSensors(useSensor(PointerSensor));
 
   const selectedNote = selectedId
@@ -316,7 +324,6 @@ export default function EditPDFLite() {
       const savedTheme = localStorage.getItem("pdf-studio-theme");
       if (savedTheme === "dark") setDarkMode(true);
     }
-
     import("pdfjs-dist").then((pdfjsLib) => {
       pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
       setPdfjs(pdfjsLib);
@@ -329,6 +336,32 @@ export default function EditPDFLite() {
     if (typeof window !== "undefined") {
       localStorage.setItem("pdf-studio-theme", nextMode ? "dark" : "light");
     }
+  };
+
+  /**
+   * REVISED HISTORY LOGIC
+   */
+  const takeSnapshot = useCallback(() => {
+    setPast((prev) => [...prev, deepCloneState({ strokes, annotations })]);
+    setFuture([]);
+  }, [strokes, annotations]);
+
+  const undo = () => {
+    if (past.length === 0) return;
+    const previous = past[past.length - 1];
+    setFuture((prev) => [deepCloneState({ strokes, annotations }), ...prev]);
+    setPast((prev) => prev.slice(0, -1));
+    setStrokes(previous.strokes);
+    setAnnotations(previous.annotations);
+  };
+
+  const redo = () => {
+    if (future.length === 0) return;
+    const next = future[0];
+    setPast((prev) => [...prev, deepCloneState({ strokes, annotations })]);
+    setFuture((prev) => prev.slice(1));
+    setStrokes(next.strokes);
+    setAnnotations(next.annotations);
   };
 
   const redrawStrokes = useCallback(
@@ -359,35 +392,27 @@ export default function EditPDFLite() {
       if (!pdf) return;
       setLoading(true);
       for (let i = 1; i <= pdf.numPages; i++) {
-        if (renderTasks.current[i]) {
-          renderTasks.current[i].cancel();
-        }
-
+        if (renderTasks.current[i]) renderTasks.current[i].cancel();
         try {
           const page = await pdf.getPage(i);
           const viewport = page.getViewport({ scale });
           const canvas = canvasRefs.current[i];
-
           if (canvas) {
             const ctx = canvas.getContext("2d");
             if (!ctx) continue;
             canvas.height = viewport.height;
             canvas.width = viewport.width;
-
             const renderTask = page.render({ canvasContext: ctx, viewport });
             renderTasks.current[i] = renderTask;
             await renderTask.promise;
           }
-
           if (drawCanvasRefs.current[i]) {
             drawCanvasRefs.current[i]!.height = viewport.height;
             drawCanvasRefs.current[i]!.width = viewport.width;
             redrawStrokes(i);
           }
         } catch (e: any) {
-          if (e.name !== "RenderingCancelledException") {
-            console.error(`Page ${i} render error:`, e);
-          }
+          if (e.name !== "RenderingCancelledException") console.error(e);
         }
       }
       setLoading(false);
@@ -399,12 +424,20 @@ export default function EditPDFLite() {
     if (pdfDoc) renderAllPages(pdfDoc, zoom);
   }, [zoom, pdfDoc, renderAllPages]);
 
+  useEffect(() => {
+    if (pdfDoc) {
+      for (let i = 1; i <= totalPages; i++) redrawStrokes(i);
+    }
+  }, [strokes, pdfDoc, totalPages, redrawStrokes]);
+
   const mergeAndLoad = async () => {
     if (uploadedFiles.length === 0 || !pdfjs) return;
     setLoading(true);
     setPdfDoc(null);
     setAnnotations({});
     setStrokes({});
+    setPast([]);
+    setFuture([]);
     try {
       const mergedPdf = await PDFDocument.create();
       for (const file of uploadedFiles) {
@@ -414,12 +447,11 @@ export default function EditPDFLite() {
       }
       const bytes = await mergedPdf.save();
       setMergedBytes(bytes);
-
       const pdf = await pdfjs.getDocument({ data: bytes.slice(0) }).promise;
       setPdfDoc(pdf);
       setTotalPages(pdf.numPages);
     } catch (e) {
-      console.error("Merge error:", e);
+      console.error(e);
       alert("Error merging documents.");
     } finally {
       setLoading(false);
@@ -441,23 +473,15 @@ export default function EditPDFLite() {
 
   const nudge = (dx: number, dy: number) => {
     if (!selectedId) return;
+    takeSnapshot();
     const note = annotations[selectedId.page]?.find(
       (n) => n.id === selectedId.id,
     );
-    if (note) {
+    if (note)
       updateNote(selectedId.page, selectedId.id, {
         x: note.x + dx,
         y: note.y + dy,
       });
-    }
-  };
-
-  const undoDraw = (pageNum: number) => {
-    setStrokes((prev) => {
-      const pageStrokes = [...(prev[pageNum] || [])];
-      pageStrokes.pop();
-      return { ...prev, [pageNum]: pageStrokes };
-    });
   };
 
   const downloadPDF = async () => {
@@ -466,18 +490,15 @@ export default function EditPDFLite() {
     try {
       const pdfLibDoc = await PDFDocument.load(mergedBytes.slice(0));
       const pages = pdfLibDoc.getPages();
-
       const hexToRgb = (hex: string) => {
         const r = parseInt(hex.slice(1, 3), 16) / 255;
         const g = parseInt(hex.slice(3, 5), 16) / 255;
         const b = parseInt(hex.slice(5, 7), 16) / 255;
         return rgb(r, g, b);
       };
-
       for (let i = 1; i <= totalPages; i++) {
         const pdfPage = pages[i - 1];
         const { height: pageHeight } = pdfPage.getSize();
-
         (strokes[i] || []).forEach((s) => {
           for (let j = 0; j < s.points.length - 1; j++) {
             pdfPage.drawLine({
@@ -488,7 +509,6 @@ export default function EditPDFLite() {
             });
           }
         });
-
         (annotations[i] || []).forEach((n) => {
           let fontVariant;
           if (n.isBold && n.isItalic)
@@ -515,18 +535,10 @@ export default function EditPDFLite() {
           });
         });
       }
-
       const bytes = await pdfLibDoc.save();
-
-      /**
-       * Vercel TypeScript Fix:
-       * Constructing a fresh ArrayBuffer and copying bytes manually
-       * prevents "ArrayBufferLike" to "BlobPart" assignment errors.
-       */
       const freshBuffer = new ArrayBuffer(bytes.length);
       const uint8View = new Uint8Array(freshBuffer);
       uint8View.set(bytes);
-
       const blob = new Blob([freshBuffer], { type: "application/pdf" });
       const downloadUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -535,10 +547,9 @@ export default function EditPDFLite() {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-
       setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
     } catch (err) {
-      console.error("Export failure:", err);
+      console.error(err);
       alert("Could not export PDF.");
     } finally {
       setLoading(false);
@@ -582,16 +593,17 @@ export default function EditPDFLite() {
     transition: "all 0.15s ease",
   });
 
-  const iconBtnBase = {
+  const iconBtnBase = (disabled?: boolean) => ({
     padding: "6px",
     background: "none",
     border: "none",
-    color: theme.text,
-    cursor: "pointer",
+    color: disabled ? theme.subText : theme.text,
+    cursor: disabled ? "default" : "pointer",
+    opacity: disabled ? 0.4 : 1,
     borderRadius: "4px",
     display: "flex",
     alignItems: "center",
-  };
+  });
 
   const ColorSwatch = ({
     color,
@@ -646,7 +658,6 @@ export default function EditPDFLite() {
       >
         <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
           <div style={{ fontWeight: 600, fontSize: "14px" }}>PDF Studio</div>
-
           {pdfDoc && (
             <div
               style={{
@@ -681,7 +692,6 @@ export default function EditPDFLite() {
               </button>
             </div>
           )}
-
           <input
             type="file"
             id="pdf-upload-input"
@@ -713,6 +723,53 @@ export default function EditPDFLite() {
             <div
               style={{
                 display: "flex",
+                gap: "4px",
+                paddingRight: "8px",
+                borderRight: `1px solid ${theme.border}`,
+              }}
+            >
+              <button
+                onClick={undo}
+                disabled={past.length === 0}
+                style={iconBtnBase(past.length === 0) as any}
+                title="Undo"
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                >
+                  <path d="M9 14L4 9l5-5" />
+                  <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H13" />
+                </svg>
+              </button>
+              <button
+                onClick={redo}
+                disabled={future.length === 0}
+                style={iconBtnBase(future.length === 0) as any}
+                title="Redo"
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                >
+                  <path d="M15 14l5-5-5-5" />
+                  <path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H11" />
+                </svg>
+              </button>
+            </div>
+          )}
+          {pdfDoc && (
+            <div
+              style={{
+                display: "flex",
                 alignItems: "center",
                 gap: "4px",
                 backgroundColor: darkMode ? "#3a3a3c" : "#f2f2f7",
@@ -722,7 +779,7 @@ export default function EditPDFLite() {
             >
               <button
                 type="button"
-                style={iconBtnBase as any}
+                style={iconBtnBase() as any}
                 onClick={() => setZoom((z) => Math.max(z - 0.1, 0.5))}
               >
                 <svg
@@ -748,7 +805,7 @@ export default function EditPDFLite() {
               </span>
               <button
                 type="button"
-                style={iconBtnBase as any}
+                style={iconBtnBase() as any}
                 onClick={() => setZoom((z) => z + 0.1)}
               >
                 <svg
@@ -764,11 +821,10 @@ export default function EditPDFLite() {
               </button>
             </div>
           )}
-
           <button
             type="button"
             onClick={toggleDarkMode}
-            style={iconBtnBase as any}
+            style={iconBtnBase() as any}
           >
             {darkMode ? (
               <svg
@@ -795,7 +851,6 @@ export default function EditPDFLite() {
               </svg>
             )}
           </button>
-
           {pdfDoc && (
             <button
               type="button"
@@ -918,7 +973,10 @@ export default function EditPDFLite() {
                         key={c}
                         color={c}
                         active={strokeColor === c}
-                        onClick={() => setStrokeColor(c)}
+                        onClick={() => {
+                          takeSnapshot();
+                          setStrokeColor(c);
+                        }}
                       />
                     ))}
                   </div>
@@ -934,6 +992,7 @@ export default function EditPDFLite() {
                     min="1"
                     max="15"
                     value={strokeWidth}
+                    onMouseDown={() => takeSnapshot()}
                     onChange={(e) => setStrokeWidth(parseInt(e.target.value))}
                     style={{ width: "60px", accentColor: theme.accent }}
                   />
@@ -949,13 +1008,13 @@ export default function EditPDFLite() {
                   </span>
                 </div>
               )}
-
               {selectedNote && (
                 <div
                   style={{ display: "flex", gap: "12px", alignItems: "center" }}
                 >
                   <select
                     value={selectedNote.fontFamily}
+                    onMouseDown={() => takeSnapshot()}
                     onChange={(e) =>
                       updateNote(selectedId!.page, selectedId!.id, {
                         fontFamily: e.target.value,
@@ -976,6 +1035,7 @@ export default function EditPDFLite() {
                   <input
                     type="number"
                     value={selectedNote.fontSize}
+                    onMouseDown={() => takeSnapshot()}
                     onChange={(e) =>
                       updateNote(selectedId!.page, selectedId!.id, {
                         fontSize: parseInt(e.target.value),
@@ -998,15 +1058,15 @@ export default function EditPDFLite() {
                     }}
                   >
                     <button
-                      type="button"
-                      onClick={() =>
+                      onClick={() => {
+                        takeSnapshot();
                         updateNote(selectedId!.page, selectedId!.id, {
                           isBold: !selectedNote.isBold,
-                        })
-                      }
+                        });
+                      }}
                       style={
                         {
-                          ...iconBtnBase,
+                          ...iconBtnBase(),
                           padding: "4px 10px",
                           backgroundColor: selectedNote.isBold
                             ? theme.border
@@ -1018,15 +1078,15 @@ export default function EditPDFLite() {
                       B
                     </button>
                     <button
-                      type="button"
-                      onClick={() =>
+                      onClick={() => {
+                        takeSnapshot();
                         updateNote(selectedId!.page, selectedId!.id, {
                           isItalic: !selectedNote.isItalic,
-                        })
-                      }
+                        });
+                      }}
                       style={
                         {
-                          ...iconBtnBase,
+                          ...iconBtnBase(),
                           padding: "4px 10px",
                           backgroundColor: selectedNote.isItalic
                             ? theme.border
@@ -1051,6 +1111,7 @@ export default function EditPDFLite() {
                       min="50"
                       max="600"
                       value={selectedNote.width}
+                      onMouseDown={() => takeSnapshot()}
                       onChange={(e) =>
                         updateNote(selectedId!.page, selectedId!.id, {
                           width: parseInt(e.target.value),
@@ -1065,19 +1126,19 @@ export default function EditPDFLite() {
                         key={c}
                         color={c}
                         active={selectedNote.color === c}
-                        onClick={() =>
+                        onClick={() => {
+                          takeSnapshot();
                           updateNote(selectedId!.page, selectedId!.id, {
                             color: c,
-                          })
-                        }
+                          });
+                        }}
                       />
                     ))}
                   </div>
                   <div style={{ display: "flex", gap: "2px" }}>
                     <button
-                      type="button"
                       onClick={() => nudge(0, -2)}
-                      style={iconBtnBase as any}
+                      style={iconBtnBase() as any}
                     >
                       <svg
                         width="14"
@@ -1091,9 +1152,8 @@ export default function EditPDFLite() {
                       </svg>
                     </button>
                     <button
-                      type="button"
                       onClick={() => nudge(0, 2)}
-                      style={iconBtnBase as any}
+                      style={iconBtnBase() as any}
                     >
                       <svg
                         width="14"
@@ -1107,9 +1167,8 @@ export default function EditPDFLite() {
                       </svg>
                     </button>
                     <button
-                      type="button"
                       onClick={() => nudge(-2, 0)}
-                      style={iconBtnBase as any}
+                      style={iconBtnBase() as any}
                     >
                       <svg
                         width="14"
@@ -1123,9 +1182,8 @@ export default function EditPDFLite() {
                       </svg>
                     </button>
                     <button
-                      type="button"
                       onClick={() => nudge(2, 0)}
-                      style={iconBtnBase as any}
+                      style={iconBtnBase() as any}
                     >
                       <svg
                         width="14"
@@ -1140,9 +1198,9 @@ export default function EditPDFLite() {
                     </button>
                   </div>
                   <button
-                    type="button"
                     onClick={() => {
                       if (selectedId) {
+                        takeSnapshot();
                         setAnnotations((prev) => ({
                           ...prev,
                           [selectedId.page]: prev[selectedId.page].filter(
@@ -1154,7 +1212,7 @@ export default function EditPDFLite() {
                     }}
                     style={
                       {
-                        ...iconBtnBase,
+                        ...iconBtnBase(),
                         color: "#e02020",
                         marginLeft: "4px",
                       } as any
@@ -1292,12 +1350,11 @@ export default function EditPDFLite() {
                           canvasRefs.current[pageNum]!.getBoundingClientRect();
                         setStrokes((prev) => {
                           const pageStrokes = [...(prev[pageNum] || [])];
-                          if (pageStrokes.length > 0) {
+                          if (pageStrokes.length > 0)
                             pageStrokes[pageStrokes.length - 1].points.push({
                               x: (e.clientX - rect.left) / zoom,
                               y: (e.clientY - rect.top) / zoom,
                             });
-                          }
                           return { ...prev, [pageNum]: pageStrokes };
                         });
                         redrawStrokes(pageNum);
@@ -1341,26 +1398,7 @@ export default function EditPDFLite() {
                       >
                         Page {pageNum}
                       </span>
-                      {isDrawMode && (
-                        <button
-                          type="button"
-                          onClick={() => undoDraw(pageNum)}
-                          disabled={!(strokes[pageNum]?.length > 0)}
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: theme.accent,
-                            fontSize: "11px",
-                            fontWeight: 600,
-                            cursor: "pointer",
-                            opacity: strokes[pageNum]?.length > 0 ? 1 : 0.4,
-                          }}
-                        >
-                          Undo Stroke
-                        </button>
-                      )}
                     </div>
-
                     <div
                       onMouseDown={(e) => {
                         const rect =
@@ -1368,6 +1406,7 @@ export default function EditPDFLite() {
                         const x = (e.clientX - rect.left) / zoom;
                         const y = (e.clientY - rect.top) / zoom;
                         if (isDrawMode) {
+                          takeSnapshot();
                           setIsDrawing(true);
                           setStrokes((prev) => ({
                             ...prev,
@@ -1381,6 +1420,7 @@ export default function EditPDFLite() {
                             ],
                           }));
                         } else if (isAddTextMode) {
+                          takeSnapshot();
                           const n: Annotation = {
                             id: Date.now(),
                             text: "Edit text",
@@ -1450,6 +1490,7 @@ export default function EditPDFLite() {
                             key={n.id}
                             onMouseDown={(e) => {
                               e.stopPropagation();
+                              takeSnapshot();
                               setSelectedId({ id: n.id, page: pageNum });
                               setIsDraggingText(true);
                               const rect =
@@ -1474,13 +1515,22 @@ export default function EditPDFLite() {
                           >
                             <textarea
                               value={n.text}
+                              onFocus={() => {
+                                setSelectedId({ id: n.id, page: pageNum });
+                              }}
+                              onBlur={() => {
+                                if (
+                                  n.text !==
+                                  past[past.length - 1]?.annotations[
+                                    pageNum
+                                  ]?.find((a) => a.id === n.id)?.text
+                                )
+                                  takeSnapshot();
+                              }}
                               onChange={(e) =>
                                 updateNote(pageNum, n.id, {
                                   text: e.target.value,
                                 })
-                              }
-                              onFocus={() =>
-                                setSelectedId({ id: n.id, page: pageNum })
                               }
                               onMouseDown={(e) => e.stopPropagation()}
                               style={{

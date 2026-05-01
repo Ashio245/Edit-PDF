@@ -78,11 +78,15 @@ function SortableFileItem({
   file,
   index,
   onRemove,
+  onSelect,
+  isSelected,
   theme,
 }: {
   file: FileItem;
   index: number;
   onRemove: () => void;
+  onSelect: () => void;
+  isSelected: boolean;
   theme: any;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition } =
@@ -93,45 +97,74 @@ function SortableFileItem({
     transition,
     padding: "10px 12px",
     marginBottom: "6px",
-    backgroundColor: theme.itemBg,
-    border: `1px solid ${theme.border}`,
+    backgroundColor: isSelected ? theme.accent + "15" : theme.itemBg,
+    border: `1px solid ${isSelected ? theme.accent : theme.border}`,
     borderRadius: "8px",
     fontSize: "12px",
     display: "flex",
     alignItems: "center",
     gap: "10px",
-    cursor: "grab",
+    cursor: "default",
     color: theme.text,
-    boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+    boxShadow: isSelected
+      ? "0 0 0 1px " + theme.accent
+      : "0 1px 2px rgba(0,0,0,0.04)",
   };
 
   return (
-    <div ref={setNodeRef} style={rowStyle} {...attributes} {...listeners}>
+    <div ref={setNodeRef} style={rowStyle} onClick={onSelect}>
+      {/* DRAG HANDLE: Restricted listeners here to allow row clicks */}
+      <div
+        {...attributes}
+        {...listeners}
+        style={{
+          cursor: "grab",
+          display: "flex",
+          alignItems: "center",
+          color: isSelected ? theme.accent : theme.subText,
+        }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="9" cy="5" r="2" />
+          <circle cx="9" cy="12" r="2" />
+          <circle cx="9" cy="19" r="2" />
+          <circle cx="15" cy="5" r="2" />
+          <circle cx="15" cy="12" r="2" />
+          <circle cx="15" cy="19" r="2" />
+        </svg>
+      </div>
+
       <span
         style={{
-          color: theme.subText,
+          color: isSelected ? theme.accent : theme.subText,
           fontSize: "10px",
           fontWeight: 600,
-          width: "14px",
+          width: "10px",
         }}
       >
         {index + 1}
       </span>
+
       <div
         style={{
           flex: 1,
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
-          fontWeight: 500,
+          fontWeight: isSelected ? 600 : 500,
+          cursor: "pointer",
         }}
       >
         {file.name}
       </div>
+
       <button
         type="button"
         onMouseDown={(e) => e.stopPropagation()}
-        onClick={onRemove}
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
         style={{
           border: "none",
           background: "none",
@@ -157,115 +190,143 @@ function SortableFileItem({
 }
 
 /**
- * PRE-MERGE PREVIEW CARD
+ * COMPONENT: LARGE SELECTED FILE PREVIEW
  */
-function PDFPreviewCard({
+function SelectedFilePreview({
   file,
   pdfjs,
   theme,
-  previewRenderTasks,
 }: {
   file: FileItem;
   pdfjs: any;
   theme: any;
-  previewRenderTasks: React.MutableRefObject<{ [key: string]: any }>;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [pageCount, setPageCount] = useState<number | null>(null);
-  const lastRenderId = useRef<number>(0);
+  const [pages, setPages] = useState<number[]>([]);
+  const canvasRefs = useRef<{ [key: number]: HTMLCanvasElement | null }>({});
+  const renderTasks = useRef<{ [key: number]: any }>({});
 
   useEffect(() => {
     if (!pdfjs || !file.buffer) return;
-    const currentRenderId = ++lastRenderId.current;
-    let isCancelled = false;
 
-    const loadPreview = async () => {
+    let isCancelled = false;
+    let pdfDocInstance: any = null;
+
+    const loadAllPages = async () => {
       try {
-        if (previewRenderTasks.current[file.id]) {
-          previewRenderTasks.current[file.id].cancel();
-        }
         const bufferCopy = file.buffer.slice(0);
         const loadingTask = pdfjs.getDocument({ data: bufferCopy });
         const pdf = await loadingTask.promise;
+        pdfDocInstance = pdf;
 
-        if (isCancelled || currentRenderId !== lastRenderId.current) {
+        if (isCancelled) {
           await pdf.destroy();
           return;
         }
 
-        setPageCount(pdf.numPages);
-        const page = await pdf.getPage(1);
-        const viewport = page.getViewport({ scale: 0.4 });
-        const canvas = canvasRef.current;
+        const pageIndices = Array.from(
+          { length: pdf.numPages },
+          (_, i) => i + 1,
+        );
+        setPages(pageIndices);
 
-        if (canvas) {
-          const context = canvas.getContext("2d");
-          if (!context) return;
-          canvas.height = viewport.height;
-          canvas.width = viewport.width;
+        for (const pageNum of pageIndices) {
+          if (isCancelled) break;
 
-          if (isCancelled || currentRenderId !== lastRenderId.current) {
-            await pdf.destroy();
-            return;
+          const page = await pdf.getPage(pageNum);
+          const viewport = page.getViewport({ scale: 1.1 });
+          const canvas = canvasRefs.current[pageNum];
+
+          if (canvas) {
+            const context = canvas.getContext("2d");
+            if (!context) continue;
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            if (renderTasks.current[pageNum])
+              renderTasks.current[pageNum].cancel();
+            const renderTask = page.render({
+              canvasContext: context,
+              viewport,
+            });
+            renderTasks.current[pageNum] = renderTask;
+            await renderTask.promise;
           }
-
-          const renderTask = page.render({ canvasContext: context, viewport });
-          previewRenderTasks.current[file.id] = renderTask;
-          await renderTask.promise;
         }
-        await pdf.destroy();
       } catch (e: any) {
         if (e.name !== "RenderingCancelledException") console.error(e);
       }
     };
-    loadPreview();
+
+    loadAllPages();
+
     return () => {
       isCancelled = true;
-      if (previewRenderTasks.current[file.id])
-        previewRenderTasks.current[file.id].cancel();
+      Object.values(renderTasks.current).forEach((task) => task?.cancel());
+      if (pdfDocInstance) pdfDocInstance.destroy();
     };
-  }, [file.id, file.buffer, pdfjs, previewRenderTasks]);
+  }, [file.id, file.buffer, pdfjs]);
 
   return (
     <div
       style={{
-        width: "180px",
+        width: "100%",
+        maxWidth: "850px",
         display: "flex",
         flexDirection: "column",
-        gap: "8px",
+        gap: "32px",
+        padding: "20px 0",
+        margin: "0 auto",
       }}
     >
       <div
         style={{
-          height: "240px",
-          backgroundColor: "white",
-          borderRadius: "10px",
-          border: `1px solid ${theme.border}`,
-          overflow: "hidden",
           display: "flex",
-          justifyContent: "center",
+          flexDirection: "column",
           alignItems: "center",
-          boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+          gap: "8px",
+          marginBottom: "12px",
         }}
       >
-        <canvas ref={canvasRef} style={{ maxWidth: "100%", height: "auto" }} />
-      </div>
-      <div style={{ textAlign: "center", padding: "0 4px" }}>
-        <div
+        <h2
           style={{
-            fontSize: "12px",
+            fontSize: "18px",
             fontWeight: 600,
             color: theme.text,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
+            margin: 0,
           }}
         >
           {file.name}
-        </div>
-        <div style={{ fontSize: "11px", color: theme.subText }}>
-          {pageCount ? `${pageCount} pages` : "..."}
-        </div>
+        </h2>
+        <span style={{ fontSize: "13px", color: theme.subText }}>
+          {pages.length} pages
+        </span>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "24px",
+          alignItems: "center",
+        }}
+      >
+        {pages.map((pageNum) => (
+          <div
+            key={pageNum}
+            style={{
+              boxShadow: "0 10px 30px rgba(0,0,0,0.1)",
+              border: `1px solid ${theme.border}`,
+              backgroundColor: "#fff",
+              lineHeight: 0,
+              borderRadius: "4px",
+              overflow: "hidden",
+            }}
+          >
+            <canvas
+              ref={(el) => (canvasRefs.current[pageNum] = el) as any}
+              style={{ width: "100%", height: "auto", display: "block" }}
+            />
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -288,6 +349,8 @@ export default function EditPDFLite() {
   const dragCounter = useRef(0);
 
   const [uploadedFiles, setUploadedFiles] = useState<FileItem[]>([]);
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+
   const [isDrawMode, setIsDrawMode] = useState(false);
   const [isAddTextMode, setIsAddTextMode] = useState(false);
   const [strokeColor, setStrokeColor] = useState("#e02020");
@@ -314,8 +377,9 @@ export default function EditPDFLite() {
     {},
   );
   const renderTasks = useRef<{ [key: number]: any }>({});
-  const previewRenderTasks = useRef<{ [key: string]: any }>({});
-  const sensors = useSensors(useSensor(PointerSensor));
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
 
   const selectedNote = selectedId
     ? annotations[selectedId.page]?.find((n) => n.id === selectedId.id) || null
@@ -332,6 +396,18 @@ export default function EditPDFLite() {
       setPdfjs(pdfjsLib);
     });
   }, []);
+
+  // AUTO-SYNC: Ensure a valid file is always selected
+  useEffect(() => {
+    if (uploadedFiles.length > 0) {
+      const exists = uploadedFiles.some((f) => f.id === selectedFileId);
+      if (!selectedFileId || !exists) {
+        setSelectedFileId(uploadedFiles[0].id);
+      }
+    } else {
+      setSelectedFileId(null);
+    }
+  }, [uploadedFiles, selectedFileId]);
 
   const toggleDarkMode = () => {
     const nextMode = !darkMode;
@@ -685,6 +761,8 @@ export default function EditPDFLite() {
     />
   );
 
+  const currentPreviewFile = uploadedFiles.find((f) => f.id === selectedFileId);
+
   if (!mounted) return null;
 
   return (
@@ -703,6 +781,7 @@ export default function EditPDFLite() {
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
+      {/* DRAG OVERLAY */}
       {isDraggingOver && !pdfDoc && (
         <div
           style={{
@@ -997,6 +1076,8 @@ export default function EditPDFLite() {
                     key={f.id}
                     file={f}
                     index={i}
+                    isSelected={selectedFileId === f.id}
+                    onSelect={() => setSelectedFileId(f.id)}
                     onRemove={() =>
                       setUploadedFiles((prev) =>
                         prev.filter((x) => x.id !== f.id),
@@ -1339,7 +1420,6 @@ export default function EditPDFLite() {
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
-              gap: "40px",
             }}
           >
             {!pdfDoc ? (
@@ -1412,258 +1492,252 @@ export default function EditPDFLite() {
                     </div>
                   </div>
                 ) : (
-                  <div style={{ padding: "0 20px" }}>
-                    <div
-                      style={{
-                        fontSize: "13px",
-                        fontWeight: 600,
-                        color: theme.subText,
-                        marginBottom: "24px",
-                      }}
-                    >
-                      Workspace Preview
-                    </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        flexWrap: "wrap",
-                        gap: "32px",
-                        justifyContent: "flex-start",
-                      }}
-                    >
-                      {uploadedFiles.map((file) => (
-                        <PDFPreviewCard
-                          key={file.id}
-                          file={file}
-                          pdfjs={pdfjs}
-                          theme={theme}
-                          previewRenderTasks={previewRenderTasks}
-                        />
-                      ))}
-                    </div>
+                  <div style={{ width: "100%", padding: "40px 20px" }}>
+                    {currentPreviewFile && (
+                      <SelectedFilePreview
+                        file={currentPreviewFile}
+                        pdfjs={pdfjs}
+                        theme={theme}
+                      />
+                    )}
                   </div>
                 )}
               </div>
             ) : (
-              Array.from({ length: totalPages }, (_, i) => i + 1).map(
-                (pageNum) => (
-                  <div
-                    key={pageNum}
-                    style={{ position: "relative" }}
-                    onMouseMove={(e) => {
-                      if (isDrawing && isDrawMode) {
-                        const rect =
-                          canvasRefs.current[pageNum]!.getBoundingClientRect();
-                        setStrokes((prev) => {
-                          const pageStrokes = [...(prev[pageNum] || [])];
-                          if (pageStrokes.length > 0)
-                            pageStrokes[pageStrokes.length - 1].points.push({
-                              x: (e.clientX - rect.left) / zoom,
-                              y: (e.clientY - rect.top) / zoom,
-                            });
-                          return { ...prev, [pageNum]: pageStrokes };
-                        });
-                        redrawStrokes(pageNum);
-                      }
-                      if (
-                        isDraggingText &&
-                        selectedId &&
-                        selectedId.page === pageNum
-                      ) {
-                        const rect =
-                          canvasRefs.current[pageNum]!.getBoundingClientRect();
-                        updateNote(pageNum, selectedId.id, {
-                          x: (e.clientX - rect.left - dragOffset.x) / zoom,
-                          y: (e.clientY - rect.top - dragOffset.y) / zoom,
-                        });
-                      }
-                    }}
-                    onMouseUp={() => {
-                      if (isDrawing || isDraggingText) takeSnapshot();
-                      setIsDrawing(false);
-                      setIsDraggingText(false);
-                    }}
-                  >
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "40px",
+                  alignItems: "center",
+                }}
+              >
+                {Array.from({ length: totalPages }, (_, i) => i + 1).map(
+                  (pageNum) => (
                     <div
-                      style={{
-                        position: "absolute",
-                        top: "-28px",
-                        left: "0",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "10px",
-                        width: "100%",
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: "11px",
-                          fontWeight: 700,
-                          color: theme.subText,
-                          textTransform: "uppercase",
-                        }}
-                      >
-                        Page {pageNum}
-                      </span>
-                    </div>
-                    <div
-                      onMouseDown={(e) => {
-                        const rect =
-                          canvasRefs.current[pageNum]!.getBoundingClientRect();
-                        const x = (e.clientX - rect.left) / zoom;
-                        const y = (e.clientY - rect.top) / zoom;
-                        if (isDrawMode) {
-                          takeSnapshot();
-                          setIsDrawing(true);
-                          setStrokes((prev) => ({
-                            ...prev,
-                            [pageNum]: [
-                              ...(prev[pageNum] || []),
-                              {
-                                points: [{ x, y }],
-                                color: strokeColor,
-                                width: strokeWidth,
-                              },
-                            ],
-                          }));
-                        } else if (isAddTextMode) {
-                          takeSnapshot();
-                          const n: Annotation = {
-                            id: Date.now(),
-                            text: "Edit text",
-                            x,
-                            y,
-                            width: 150,
-                            fontSize: 14,
-                            color: "#1d1d1f",
-                            bgColor: "",
-                            textAlign: "left",
-                            fontFamily: "Helvetica",
-                            isBold: false,
-                            isItalic: false,
-                          };
-                          setAnnotations((prev) => ({
-                            ...prev,
-                            [pageNum]: [...(prev[pageNum] || []), n],
-                          }));
-                          setSelectedId({ id: n.id, page: pageNum });
-                          setIsAddTextMode(false);
+                      key={pageNum}
+                      style={{ position: "relative" }}
+                      onMouseMove={(e) => {
+                        if (isDrawing && isDrawMode) {
+                          const rect =
+                            canvasRefs.current[
+                              pageNum
+                            ]!.getBoundingClientRect();
+                          setStrokes((prev) => {
+                            const pageStrokes = [...(prev[pageNum] || [])];
+                            if (pageStrokes.length > 0)
+                              pageStrokes[pageStrokes.length - 1].points.push({
+                                x: (e.clientX - rect.left) / zoom,
+                                y: (e.clientY - rect.top) / zoom,
+                              });
+                            return { ...prev, [pageNum]: pageStrokes };
+                          });
+                          redrawStrokes(pageNum);
+                        }
+                        if (
+                          isDraggingText &&
+                          selectedId &&
+                          selectedId.page === pageNum
+                        ) {
+                          const rect =
+                            canvasRefs.current[
+                              pageNum
+                            ]!.getBoundingClientRect();
+                          updateNote(pageNum, selectedId.id, {
+                            x: (e.clientX - rect.left - dragOffset.x) / zoom,
+                            y: (e.clientY - rect.top - dragOffset.y) / zoom,
+                          });
                         }
                       }}
-                      style={{
-                        position: "relative",
-                        backgroundColor: "#fff",
-                        cursor: isDrawMode
-                          ? "crosshair"
-                          : isAddTextMode
-                            ? "text"
-                            : "default",
-                        boxShadow:
-                          "0 10px 30px rgba(0,0,0,0.12), 0 1px 4px rgba(0,0,0,0.04)",
-                        border: `1px solid ${theme.border}`,
-                        borderRadius: "2px",
+                      onMouseUp={() => {
+                        if (isDrawing || isDraggingText) takeSnapshot();
+                        setIsDrawing(false);
+                        setIsDraggingText(false);
                       }}
                     >
-                      <canvas
-                        ref={(el) => {
-                          canvasRefs.current[pageNum] = el;
-                        }}
-                        style={{ display: "block" }}
-                      />
-                      <canvas
-                        ref={(el) => {
-                          drawCanvasRefs.current[pageNum] = el;
-                        }}
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          pointerEvents: "none",
-                          zIndex: 5,
-                        }}
-                      />
                       <div
                         style={{
                           position: "absolute",
-                          top: 0,
-                          left: 0,
+                          top: "-28px",
+                          left: "0",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "10px",
                           width: "100%",
-                          height: "100%",
-                          zIndex: 10,
                         }}
                       >
-                        {(annotations[pageNum] || []).map((n) => (
-                          <div
-                            key={n.id}
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              takeSnapshot();
-                              setSelectedId({ id: n.id, page: pageNum });
-                              setIsDraggingText(true);
-                              const rect =
-                                e.currentTarget.getBoundingClientRect();
-                              setDragOffset({
-                                x: e.clientX - rect.left,
-                                y: e.clientY - rect.top,
-                              });
-                            }}
-                            style={{
-                              position: "absolute",
-                              left: n.x * zoom,
-                              top: n.y * zoom,
-                              width: n.width * zoom,
-                              border:
-                                selectedId?.id === n.id
-                                  ? `2px solid ${theme.accent}`
-                                  : "1px dashed #d2d2d7",
-                              cursor: "move",
-                              borderRadius: "2px",
-                            }}
-                          >
-                            <textarea
-                              value={n.text}
-                              onFocus={() => {
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            fontWeight: 700,
+                            color: theme.subText,
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          Page {pageNum}
+                        </span>
+                      </div>
+                      <div
+                        onMouseDown={(e) => {
+                          const rect =
+                            canvasRefs.current[
+                              pageNum
+                            ]!.getBoundingClientRect();
+                          const x = (e.clientX - rect.left) / zoom;
+                          const y = (e.clientY - rect.top) / zoom;
+                          if (isDrawMode) {
+                            takeSnapshot();
+                            setIsDrawing(true);
+                            setStrokes((prev) => ({
+                              ...prev,
+                              [pageNum]: [
+                                ...(prev[pageNum] || []),
+                                {
+                                  points: [{ x, y }],
+                                  color: strokeColor,
+                                  width: strokeWidth,
+                                },
+                              ],
+                            }));
+                          } else if (isAddTextMode) {
+                            takeSnapshot();
+                            const n: Annotation = {
+                              id: Date.now(),
+                              text: "Edit text",
+                              x,
+                              y,
+                              width: 150,
+                              fontSize: 14,
+                              color: "#1d1d1f",
+                              bgColor: "",
+                              textAlign: "left",
+                              fontFamily: "Helvetica",
+                              isBold: false,
+                              isItalic: false,
+                            };
+                            setAnnotations((prev) => ({
+                              ...prev,
+                              [pageNum]: [...(prev[pageNum] || []), n],
+                            }));
+                            setSelectedId({ id: n.id, page: pageNum });
+                            setIsAddTextMode(false);
+                          }
+                        }}
+                        style={{
+                          position: "relative",
+                          backgroundColor: "#fff",
+                          cursor: isDrawMode
+                            ? "crosshair"
+                            : isAddTextMode
+                              ? "text"
+                              : "default",
+                          boxShadow:
+                            "0 10px 30px rgba(0,0,0,0.12), 0 1px 4px rgba(0,0,0,0.04)",
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: "2px",
+                        }}
+                      >
+                        <canvas
+                          ref={(el) => {
+                            canvasRefs.current[pageNum] = el;
+                          }}
+                          style={{ display: "block" }}
+                        />
+                        <canvas
+                          ref={(el) => {
+                            drawCanvasRefs.current[pageNum] = el;
+                          }}
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            pointerEvents: "none",
+                            zIndex: 5,
+                          }}
+                        />
+                        <div
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            width: "100%",
+                            height: "100%",
+                            zIndex: 10,
+                          }}
+                        >
+                          {(annotations[pageNum] || []).map((n) => (
+                            <div
+                              key={n.id}
+                              onMouseDown={(e) => {
+                                e.stopPropagation();
+                                takeSnapshot();
                                 setSelectedId({ id: n.id, page: pageNum });
+                                setIsDraggingText(true);
+                                const rect =
+                                  e.currentTarget.getBoundingClientRect();
+                                setDragOffset({
+                                  x: e.clientX - rect.left,
+                                  y: e.clientY - rect.top,
+                                });
                               }}
-                              onBlur={() => {
-                                if (
-                                  n.text !==
-                                  past[past.length - 1]?.annotations[
-                                    pageNum
-                                  ]?.find((a) => a.id === n.id)?.text
-                                )
-                                  takeSnapshot();
-                              }}
-                              onChange={(e) =>
-                                updateNote(pageNum, n.id, {
-                                  text: e.target.value,
-                                })
-                              }
-                              onMouseDown={(e) => e.stopPropagation()}
                               style={{
-                                width: "100%",
-                                background: "transparent",
-                                border: "none",
-                                outline: "none",
-                                resize: "none",
-                                fontSize: `${n.fontSize * zoom}px`,
-                                fontFamily: n.fontFamily,
-                                fontWeight: n.isBold ? "bold" : "normal",
-                                fontStyle: n.isItalic ? "italic" : "normal",
-                                color: n.color || "#1d1d1f",
-                                padding: "4px",
-                                display: "block",
-                                overflow: "hidden",
+                                position: "absolute",
+                                left: n.x * zoom,
+                                top: n.y * zoom,
+                                width: n.width * zoom,
+                                border:
+                                  selectedId?.id === n.id
+                                    ? `2px solid ${theme.accent}`
+                                    : "1px dashed #d2d2d7",
+                                cursor: "move",
+                                borderRadius: "2px",
                               }}
-                              rows={n.text.split("\n").length || 1}
-                            />
-                          </div>
-                        ))}
+                            >
+                              <textarea
+                                value={n.text}
+                                onFocus={() => {
+                                  setSelectedId({ id: n.id, page: pageNum });
+                                }}
+                                onBlur={() => {
+                                  if (
+                                    n.text !==
+                                    past[past.length - 1]?.annotations[
+                                      pageNum
+                                    ]?.find((a) => a.id === n.id)?.text
+                                  )
+                                    takeSnapshot();
+                                }}
+                                onChange={(e) =>
+                                  updateNote(pageNum, n.id, {
+                                    text: e.target.value,
+                                  })
+                                }
+                                onMouseDown={(e) => e.stopPropagation()}
+                                style={{
+                                  width: "100%",
+                                  background: "transparent",
+                                  border: "none",
+                                  outline: "none",
+                                  resize: "none",
+                                  fontSize: `${n.fontSize * zoom}px`,
+                                  fontFamily: n.fontFamily,
+                                  fontWeight: n.isBold ? "bold" : "normal",
+                                  fontStyle: n.isItalic ? "italic" : "normal",
+                                  color: n.color || "#1d1d1f",
+                                  padding: "4px",
+                                  display: "block",
+                                  overflow: "hidden",
+                                }}
+                                rows={n.text.split("\n").length || 1}
+                              />
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ),
-              )
+                  ),
+                )}
+              </div>
             )}
           </div>
         </main>

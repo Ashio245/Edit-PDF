@@ -272,7 +272,7 @@ function PDFPreviewCard({
 }
 
 /**
- * MAIN PAGE COMPONENT
+ * MAIN COMPONENT
  */
 export default function EditPDFLite() {
   const [mounted, setMounted] = useState(false);
@@ -284,7 +284,6 @@ export default function EditPDFLite() {
   const [zoom, setZoom] = useState(1.0);
   const [darkMode, setDarkMode] = useState<boolean>(false);
 
-  // Drag and Drop state
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragCounter = useRef(0);
 
@@ -342,9 +341,6 @@ export default function EditPDFLite() {
     }
   };
 
-  /**
-   * FILE HANDLING HELPER
-   */
   const handleFileProcess = useCallback(async (files: FileList | File[]) => {
     const pdfFiles = Array.from(files).filter(
       (f) =>
@@ -364,25 +360,19 @@ export default function EditPDFLite() {
     setUploadedFiles((prev) => [...prev, ...items]);
   }, []);
 
-  /**
-   * DRAG AND DROP EVENTS
-   */
   const onDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     dragCounter.current++;
-    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0)
       setIsDraggingOver(true);
-    }
   };
 
   const onDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     dragCounter.current--;
-    if (dragCounter.current === 0) {
-      setIsDraggingOver(false);
-    }
+    if (dragCounter.current === 0) setIsDraggingOver(false);
   };
 
   const onDragOver = (e: React.DragEvent) => {
@@ -395,16 +385,12 @@ export default function EditPDFLite() {
     e.stopPropagation();
     setIsDraggingOver(false);
     dragCounter.current = 0;
-
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       await handleFileProcess(e.dataTransfer.files);
       e.dataTransfer.clearData();
     }
   };
 
-  /**
-   * HISTORY LOGIC
-   */
   const takeSnapshot = useCallback(() => {
     setPast((prev) => [...prev, deepCloneState({ strokes, annotations })]);
     setFuture([]);
@@ -516,7 +502,7 @@ export default function EditPDFLite() {
       setTotalPages(pdf.numPages);
     } catch (e) {
       console.error(e);
-      alert("Error merging documents.");
+      alert("Merge error");
     } finally {
       setLoading(false);
     }
@@ -588,7 +574,6 @@ export default function EditPDFLite() {
               n.fontFamily === "TimesRoman"
                 ? StandardFonts.TimesRoman
                 : StandardFonts.Helvetica;
-
           pdfPage.drawText(n.text, {
             x: n.x,
             y: pageHeight - n.y - n.fontSize,
@@ -614,7 +599,7 @@ export default function EditPDFLite() {
       setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
     } catch (err) {
       console.error(err);
-      alert("Could not export PDF.");
+      alert("Export failure");
     } finally {
       setLoading(false);
     }
@@ -625,8 +610,11 @@ export default function EditPDFLite() {
     if (over && active.id !== over.id) {
       setUploadedFiles((items) => {
         const oldIndex = items.findIndex((it) => it.id === active.id);
-        const newIndex = items.findIndex((it) => i.id === over.id);
-        return arrayMove(items, oldIndex, newIndex);
+        const newIndex = items.findIndex((it) => it.id === over.id);
+        if (oldIndex !== -1 && newIndex !== -1) {
+          return arrayMove(items, oldIndex, newIndex);
+        }
+        return items;
       });
     }
   };
@@ -715,7 +703,6 @@ export default function EditPDFLite() {
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      {/* DRAG OVERLAY */}
       {isDraggingOver && !pdfDoc && (
         <div
           style={{

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, memo } from "react";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import {
   DndContext,
@@ -17,6 +17,14 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+
+/**
+ * CONSTANTS
+ */
+const DEFAULT_EDITOR_ZOOM = 0.85;
+const MIN_EDITOR_ZOOM = 0.5;
+const MAX_EDITOR_ZOOM = 1.75;
+const ZOOM_STEP = 0.05;
 
 /**
  * TYPES
@@ -71,6 +79,232 @@ const deepCloneState = (state: EditorState): EditorState => {
   return JSON.parse(JSON.stringify(state));
 };
 
+const isExpectedPdfError = (err: any) => {
+  return (
+    err?.name === "RenderingCancelledException" ||
+    err?.name === "AbortException" ||
+    err?.message?.includes("cancelled") ||
+    err?.message?.includes("Transport destroyed")
+  );
+};
+
+/**
+ * COMPONENT: PDF PAGE CANVAS (MEMOIZED)
+ */
+const PdfPageCanvas = memo(
+  ({
+    pageNum,
+    pdfDoc,
+    zoom,
+    canvasRefs,
+  }: {
+    pageNum: number;
+    pdfDoc: any;
+    zoom: number;
+    canvasRefs: React.MutableRefObject<{
+      [key: number]: HTMLCanvasElement | null;
+    }>;
+  }) => {
+    const renderTaskRef = useRef<any>(null);
+
+    useEffect(() => {
+      if (!pdfDoc) return;
+
+      let isCancelled = false;
+      const renderPage = async () => {
+        try {
+          if (renderTaskRef.current) {
+            renderTaskRef.current.cancel();
+            renderTaskRef.current = null;
+          }
+
+          const page = await pdfDoc.getPage(pageNum);
+          if (isCancelled) return;
+
+          const viewport = page.getViewport({ scale: zoom });
+          const canvas = canvasRefs.current[pageNum];
+
+          if (canvas) {
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            const renderTask = page.render({ canvasContext: ctx, viewport });
+            renderTaskRef.current = renderTask;
+
+            await renderTask.promise;
+          }
+        } catch (err: any) {
+          if (!isExpectedPdfError(err)) {
+            console.error(`Error rendering page ${pageNum}:`, err);
+          }
+        }
+      };
+
+      renderPage();
+      return () => {
+        isCancelled = true;
+        if (renderTaskRef.current) {
+          renderTaskRef.current.cancel();
+        }
+      };
+    }, [pageNum, pdfDoc, zoom, canvasRefs]);
+
+    return (
+      <canvas
+        ref={(el) => {
+          canvasRefs.current[pageNum] = el;
+        }}
+        style={{ display: "block" }}
+      />
+    );
+  },
+);
+PdfPageCanvas.displayName = "PdfPageCanvas";
+
+/**
+ * COMPONENT: STROKE CANVAS
+ */
+const StrokeCanvas = memo(
+  ({
+    pageNum,
+    strokes,
+    zoom,
+    drawCanvasRefs,
+    pdfCanvas,
+  }: {
+    pageNum: number;
+    strokes: Stroke[];
+    zoom: number;
+    drawCanvasRefs: React.MutableRefObject<{
+      [key: number]: HTMLCanvasElement | null;
+    }>;
+    pdfCanvas: HTMLCanvasElement | null;
+  }) => {
+    useEffect(() => {
+      const canvas = drawCanvasRefs.current[pageNum];
+      if (!canvas || !pdfCanvas) return;
+
+      // Sync dimensions to match PDF canvas exactly
+      canvas.width = pdfCanvas.width;
+      canvas.height = pdfCanvas.height;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      (strokes || []).forEach((s) => {
+        ctx.beginPath();
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = s.width * zoom;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        s.points.forEach((p, i) => {
+          if (i === 0) ctx.moveTo(p.x * zoom, p.y * zoom);
+          else ctx.lineTo(p.x * zoom, p.y * zoom);
+        });
+        ctx.stroke();
+      });
+    }, [pageNum, strokes, zoom, drawCanvasRefs, pdfCanvas]);
+
+    return (
+      <canvas
+        ref={(el) => {
+          drawCanvasRefs.current[pageNum] = el;
+        }}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          pointerEvents: "none",
+          zIndex: 5,
+          width: "100%",
+          height: "100%",
+        }}
+      />
+    );
+  },
+);
+StrokeCanvas.displayName = "StrokeCanvas";
+
+/**
+ * COMPONENT: TEXT ANNOTATION
+ */
+const TextAnnotation = memo(
+  ({
+    annotation,
+    zoom,
+    isSelected,
+    onSelect,
+    onUpdate,
+    onCommit,
+    onDragStart,
+  }: {
+    annotation: Annotation;
+    zoom: number;
+    isSelected: boolean;
+    onSelect: () => void;
+    onUpdate: (id: number, text: string) => void;
+    onCommit: () => void;
+    onDragStart: (e: React.MouseEvent, id: number) => void;
+  }) => {
+    const [localText, setLocalText] = useState(annotation.text);
+
+    useEffect(() => {
+      setLocalText(annotation.text);
+    }, [annotation.text]);
+
+    const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      setLocalText(e.target.value);
+      onUpdate(annotation.id, e.target.value);
+    };
+
+    return (
+      <div
+        onMouseDown={(e) => onDragStart(e, annotation.id)}
+        style={{
+          position: "absolute",
+          left: annotation.x * zoom,
+          top: annotation.y * zoom,
+          width: annotation.width * zoom,
+          backgroundColor: annotation.bgColor || "transparent",
+          border: isSelected ? `2px solid #0071e3` : "1px dashed #d2d2d7",
+          cursor: "move",
+          borderRadius: "2px",
+          zIndex: 15,
+          pointerEvents: "auto",
+        }}
+      >
+        <textarea
+          value={localText}
+          onFocus={onSelect}
+          onBlur={onCommit}
+          onChange={handleChange}
+          onMouseDown={(e) => e.stopPropagation()}
+          style={{
+            width: "100%",
+            background: "transparent",
+            border: "none",
+            outline: "none",
+            resize: "none",
+            fontSize: `${annotation.fontSize * zoom}px`,
+            fontFamily: annotation.fontFamily,
+            fontWeight: annotation.isBold ? "bold" : "normal",
+            fontStyle: annotation.isItalic ? "italic" : "normal",
+            color: annotation.color || "#1d1d1f",
+            padding: "4px",
+            display: "block",
+            overflow: "hidden",
+          }}
+          rows={localText.split("\n").length || 1}
+        />
+      </div>
+    );
+  },
+);
+TextAnnotation.displayName = "TextAnnotation";
+
 /**
  * SIDEBAR SORTABLE ITEM
  */
@@ -81,17 +315,9 @@ function SortableFileItem({
   onSelect,
   isSelected,
   theme,
-}: {
-  file: FileItem;
-  index: number;
-  onRemove: () => void;
-  onSelect: () => void;
-  isSelected: boolean;
-  theme: any;
-}) {
+}: any) {
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id: file.id });
-
   const rowStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -104,23 +330,16 @@ function SortableFileItem({
     display: "flex",
     alignItems: "center",
     gap: "10px",
-    cursor: "default",
     color: theme.text,
-    boxShadow: isSelected
-      ? "0 0 0 1px " + theme.accent
-      : "0 1px 2px rgba(0,0,0,0.04)",
   };
-
   return (
     <div ref={setNodeRef} style={rowStyle} onClick={onSelect}>
-      {/* DRAG HANDLE: Restricted listeners here to allow row clicks */}
       <div
         {...attributes}
         {...listeners}
         style={{
           cursor: "grab",
           display: "flex",
-          alignItems: "center",
           color: isSelected ? theme.accent : theme.subText,
         }}
       >
@@ -133,7 +352,6 @@ function SortableFileItem({
           <circle cx="15" cy="19" r="2" />
         </svg>
       </div>
-
       <span
         style={{
           color: isSelected ? theme.accent : theme.subText,
@@ -144,7 +362,6 @@ function SortableFileItem({
       >
         {index + 1}
       </span>
-
       <div
         style={{
           flex: 1,
@@ -157,10 +374,8 @@ function SortableFileItem({
       >
         {file.name}
       </div>
-
       <button
         type="button"
-        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
           onRemove();
@@ -170,8 +385,6 @@ function SortableFileItem({
           background: "none",
           color: theme.subText,
           cursor: "pointer",
-          padding: "4px",
-          display: "flex",
         }}
       >
         <svg
@@ -190,150 +403,100 @@ function SortableFileItem({
 }
 
 /**
- * COMPONENT: LARGE SELECTED FILE PREVIEW
+ * PRE-MERGE PREVIEW
  */
-function SelectedFilePreview({
-  file,
-  pdfjs,
-  theme,
-}: {
-  file: FileItem;
-  pdfjs: any;
-  theme: any;
-}) {
+function SelectedFilePreview({ file, pdfjs, theme }: any) {
   const [pages, setPages] = useState<number[]>([]);
   const canvasRefs = useRef<{ [key: number]: HTMLCanvasElement | null }>({});
   const renderTasks = useRef<{ [key: number]: any }>({});
 
   useEffect(() => {
     if (!pdfjs || !file.buffer) return;
-
     let isCancelled = false;
     let pdfDocInstance: any = null;
 
-    const loadAllPages = async () => {
+    const load = async () => {
       try {
-        const bufferCopy = file.buffer.slice(0);
-        const loadingTask = pdfjs.getDocument({ data: bufferCopy });
-        const pdf = await loadingTask.promise;
+        const pdf = await pdfjs.getDocument({ data: file.buffer.slice(0) })
+          .promise;
+        if (isCancelled) return pdf.destroy();
         pdfDocInstance = pdf;
-
-        if (isCancelled) {
-          await pdf.destroy();
-          return;
-        }
-
-        const pageIndices = Array.from(
-          { length: pdf.numPages },
-          (_, i) => i + 1,
-        );
-        setPages(pageIndices);
-
-        for (const pageNum of pageIndices) {
+        setPages(Array.from({ length: pdf.numPages }, (_, i) => i + 1));
+        for (let i = 1; i <= pdf.numPages; i++) {
           if (isCancelled) break;
-
-          const page = await pdf.getPage(pageNum);
-          const viewport = page.getViewport({ scale: 1.1 });
-          const canvas = canvasRefs.current[pageNum];
-
-          if (canvas) {
-            const context = canvas.getContext("2d");
-            if (!context) continue;
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
-
-            if (renderTasks.current[pageNum])
-              renderTasks.current[pageNum].cancel();
+          const page = await pdf.getPage(i);
+          const vp = page.getViewport({ scale: 1.1 });
+          const cvs = canvasRefs.current[i];
+          if (cvs) {
+            cvs.height = vp.height;
+            cvs.width = vp.width;
             const renderTask = page.render({
-              canvasContext: context,
-              viewport,
+              canvasContext: cvs.getContext("2d")!,
+              viewport: vp,
             });
-            renderTasks.current[pageNum] = renderTask;
-            await renderTask.promise;
+            renderTasks.current[i] = renderTask;
+            try {
+              await renderTask.promise;
+            } catch (e) {
+              if (!isExpectedPdfError(e)) throw e;
+            }
           }
         }
-      } catch (e: any) {
-        if (e.name !== "RenderingCancelledException") console.error(e);
+      } catch (e) {
+        if (!isExpectedPdfError(e)) console.error(e);
       }
     };
-
-    loadAllPages();
-
+    load();
     return () => {
       isCancelled = true;
-      Object.values(renderTasks.current).forEach((task) => task?.cancel());
+      Object.values(renderTasks.current).forEach((t) => t?.cancel());
       if (pdfDocInstance) pdfDocInstance.destroy();
     };
-  }, [file.id, file.buffer, pdfjs]);
+  }, [file, pdfjs]);
 
   return (
     <div
       style={{
         width: "100%",
         maxWidth: "850px",
+        margin: "0 auto",
         display: "flex",
         flexDirection: "column",
         gap: "32px",
-        padding: "20px 0",
-        margin: "0 auto",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: "8px",
-          marginBottom: "12px",
-        }}
-      >
-        <h2
-          style={{
-            fontSize: "18px",
-            fontWeight: 600,
-            color: theme.text,
-            margin: 0,
-          }}
-        >
+      <div style={{ textAlign: "center" }}>
+        <h2 style={{ fontSize: "18px", fontWeight: 600, color: theme.text }}>
           {file.name}
         </h2>
         <span style={{ fontSize: "13px", color: theme.subText }}>
           {pages.length} pages
         </span>
       </div>
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "24px",
-          alignItems: "center",
-        }}
-      >
-        {pages.map((pageNum) => (
-          <div
-            key={pageNum}
-            style={{
-              boxShadow: "0 10px 30px rgba(0,0,0,0.1)",
-              border: `1px solid ${theme.border}`,
-              backgroundColor: "#fff",
-              lineHeight: 0,
-              borderRadius: "4px",
-              overflow: "hidden",
+      {pages.map((p) => (
+        <div
+          key={p}
+          style={{
+            boxShadow: "0 10px 30px rgba(0,0,0,0.1)",
+            border: `1px solid ${theme.border}`,
+            background: "#fff",
+            lineHeight: 0,
+          }}
+        >
+          <canvas
+            ref={(el) => {
+              canvasRefs.current[p] = el;
             }}
-          >
-            <canvas
-              ref={(el) => (canvasRefs.current[pageNum] = el) as any}
-              style={{ width: "100%", height: "auto", display: "block" }}
-            />
-          </div>
-        ))}
-      </div>
+            style={{ width: "100%", height: "auto" }}
+          />
+        </div>
+      ))}
     </div>
   );
 }
 
 /**
- * MAIN COMPONENT
+ * MAIN PAGE
  */
 export default function EditPDFLite() {
   const [mounted, setMounted] = useState(false);
@@ -342,17 +505,15 @@ export default function EditPDFLite() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [mergedBytes, setMergedBytes] = useState<Uint8Array | null>(null);
   const [totalPages, setTotalPages] = useState(0);
-  const [zoom, setZoom] = useState(1.0);
-  const [darkMode, setDarkMode] = useState<boolean>(false);
-
+  const [zoom, setZoom] = useState(DEFAULT_EDITOR_ZOOM);
+  const [darkMode, setDarkMode] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragCounter = useRef(0);
-
   const [uploadedFiles, setUploadedFiles] = useState<FileItem[]>([]);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
-
   const [isDrawMode, setIsDrawMode] = useState(false);
   const [isAddTextMode, setIsAddTextMode] = useState(false);
+
   const [strokeColor, setStrokeColor] = useState("#e02020");
   const [strokeWidth, setStrokeWidth] = useState(3);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -361,10 +522,8 @@ export default function EditPDFLite() {
   const [annotations, setAnnotations] = useState<{
     [page: number]: Annotation[];
   }>({});
-
   const [past, setPast] = useState<EditorState[]>([]);
   const [future, setFuture] = useState<EditorState[]>([]);
-
   const [selectedId, setSelectedId] = useState<{
     id: number;
     page: number;
@@ -376,20 +535,15 @@ export default function EditPDFLite() {
   const drawCanvasRefs = useRef<{ [key: number]: HTMLCanvasElement | null }>(
     {},
   );
-  const renderTasks = useRef<{ [key: number]: any }>({});
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
 
-  const selectedNote = selectedId
-    ? annotations[selectedId.page]?.find((n) => n.id === selectedId.id) || null
-    : null;
-
   useEffect(() => {
     setMounted(true);
     if (typeof window !== "undefined") {
-      const savedTheme = localStorage.getItem("pdf-studio-theme");
-      if (savedTheme === "dark") setDarkMode(true);
+      if (localStorage.getItem("pdf-studio-theme") === "dark")
+        setDarkMode(true);
     }
     import("pdfjs-dist").then((pdfjsLib) => {
       pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
@@ -397,164 +551,58 @@ export default function EditPDFLite() {
     });
   }, []);
 
-  // AUTO-SYNC: Ensure a valid file is always selected
   useEffect(() => {
-    if (uploadedFiles.length > 0) {
-      const exists = uploadedFiles.some((f) => f.id === selectedFileId);
-      if (!selectedFileId || !exists) {
-        setSelectedFileId(uploadedFiles[0].id);
-      }
-    } else {
-      setSelectedFileId(null);
-    }
+    if (
+      uploadedFiles.length > 0 &&
+      (!selectedFileId || !uploadedFiles.some((f) => f.id === selectedFileId))
+    ) {
+      setSelectedFileId(uploadedFiles[0].id);
+    } else if (uploadedFiles.length === 0) setSelectedFileId(null);
   }, [uploadedFiles, selectedFileId]);
-
-  const toggleDarkMode = () => {
-    const nextMode = !darkMode;
-    setDarkMode(nextMode);
-    if (typeof window !== "undefined") {
-      localStorage.setItem("pdf-studio-theme", nextMode ? "dark" : "light");
-    }
-  };
-
-  const handleFileProcess = useCallback(async (files: FileList | File[]) => {
-    const pdfFiles = Array.from(files).filter(
-      (f) =>
-        f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"),
-    );
-    if (pdfFiles.length === 0) return;
-
-    const items: FileItem[] = [];
-    for (let i = 0; i < pdfFiles.length; i++) {
-      const b = await pdfFiles[i].arrayBuffer();
-      items.push({
-        id: `f-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 9)}`,
-        name: pdfFiles[i].name,
-        buffer: b,
-      });
-    }
-    setUploadedFiles((prev) => [...prev, ...items]);
-  }, []);
-
-  const onDragEnter = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter.current++;
-    if (e.dataTransfer.items && e.dataTransfer.items.length > 0)
-      setIsDraggingOver(true);
-  };
-
-  const onDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter.current--;
-    if (dragCounter.current === 0) setIsDraggingOver(false);
-  };
-
-  const onDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
-  const onDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingOver(false);
-    dragCounter.current = 0;
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      await handleFileProcess(e.dataTransfer.files);
-      e.dataTransfer.clearData();
-    }
-  };
 
   const takeSnapshot = useCallback(() => {
     setPast((prev) => [...prev, deepCloneState({ strokes, annotations })]);
     setFuture([]);
   }, [strokes, annotations]);
 
-  const undo = () => {
-    if (past.length === 0) return;
-    const previous = past[past.length - 1];
-    setFuture((prev) => [deepCloneState({ strokes, annotations }), ...prev]);
-    setPast((prev) => prev.slice(0, -1));
-    setStrokes(previous.strokes);
-    setAnnotations(previous.annotations);
-  };
-
-  const redo = () => {
-    if (future.length === 0) return;
-    const next = future[0];
-    setPast((prev) => [...prev, deepCloneState({ strokes, annotations })]);
-    setFuture((prev) => prev.slice(1));
-    setStrokes(next.strokes);
-    setAnnotations(next.annotations);
-  };
-
-  const redrawStrokes = useCallback(
-    (pageNum: number) => {
-      const canvas = drawCanvasRefs.current[pageNum];
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      (strokes[pageNum] || []).forEach((s) => {
-        ctx.beginPath();
-        ctx.strokeStyle = s.color;
-        ctx.lineWidth = s.width * zoom;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        s.points.forEach((p, i) => {
-          if (i === 0) ctx.moveTo(p.x * zoom, p.y * zoom);
-          else ctx.lineTo(p.x * zoom, p.y * zoom);
-        });
-        ctx.stroke();
-      });
-    },
-    [strokes, zoom],
-  );
-
-  const renderAllPages = useCallback(
-    async (pdf: any, scale: number) => {
-      if (!pdf) return;
-      setLoading(true);
-      for (let i = 1; i <= pdf.numPages; i++) {
-        if (renderTasks.current[i]) renderTasks.current[i].cancel();
-        try {
-          const page = await pdf.getPage(i);
-          const viewport = page.getViewport({ scale });
-          const canvas = canvasRefs.current[i];
-          if (canvas) {
-            const ctx = canvas.getContext("2d");
-            if (!ctx) continue;
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
-            const renderTask = page.render({ canvasContext: ctx, viewport });
-            renderTasks.current[i] = renderTask;
-            await renderTask.promise;
-          }
-          if (drawCanvasRefs.current[i]) {
-            drawCanvasRefs.current[i]!.height = viewport.height;
-            drawCanvasRefs.current[i]!.width = viewport.width;
-            redrawStrokes(i);
-          }
-        } catch (e: any) {
-          if (e.name !== "RenderingCancelledException") console.error(e);
+  const handleFileProcess = useCallback(async (files: FileList | File[]) => {
+    setLoading(true);
+    const items: FileItem[] = [];
+    for (const file of Array.from(files)) {
+      const lower = file.name.toLowerCase();
+      try {
+        if (lower.endsWith(".pdf")) {
+          items.push({
+            id: `f-${Date.now()}-${Math.random()}`,
+            name: file.name,
+            buffer: await file.arrayBuffer(),
+          });
+        } else if (/\.(jpg|jpeg|png)$/.test(lower)) {
+          const doc = await PDFDocument.create();
+          const imgData = await file.arrayBuffer();
+          const img = lower.endsWith(".png")
+            ? await doc.embedPng(imgData)
+            : await doc.embedJpg(imgData);
+          const { width, height } = img.scale(1);
+          doc
+            .addPage([width, height])
+            .drawImage(img, { x: 0, y: 0, width, height });
+          const bytes = await doc.save();
+          const buf = new ArrayBuffer(bytes.length);
+          new Uint8Array(buf).set(bytes);
+          items.push({
+            id: `f-${Date.now()}-${Math.random()}`,
+            name: file.name.replace(/\.[^/.]+$/, "") + ".pdf",
+            buffer: buf,
+          });
         }
+      } catch (e) {
+        console.error(e);
       }
-      setLoading(false);
-    },
-    [zoom, redrawStrokes],
-  );
-
-  useEffect(() => {
-    if (pdfDoc) renderAllPages(pdfDoc, zoom);
-  }, [zoom, pdfDoc, renderAllPages]);
-
-  useEffect(() => {
-    if (pdfDoc) {
-      for (let i = 1; i <= totalPages; i++) redrawStrokes(i);
     }
-  }, [strokes, pdfDoc, totalPages, redrawStrokes]);
+    setUploadedFiles((prev) => [...prev, ...items]);
+    setLoading(false);
+  }, []);
 
   const mergeAndLoad = async () => {
     if (uploadedFiles.length === 0 || !pdfjs) return;
@@ -564,6 +612,7 @@ export default function EditPDFLite() {
     setStrokes({});
     setPast([]);
     setFuture([]);
+    setZoom(DEFAULT_EDITOR_ZOOM);
     try {
       const mergedPdf = await PDFDocument.create();
       for (const file of uploadedFiles) {
@@ -577,121 +626,121 @@ export default function EditPDFLite() {
       setPdfDoc(pdf);
       setTotalPages(pdf.numPages);
     } catch (e) {
-      console.error(e);
-      alert("Merge error");
+      if (!isExpectedPdfError(e)) console.error(e);
     } finally {
       setLoading(false);
     }
   };
 
-  const updateNote = (
-    page: number,
-    id: number,
-    updates: Partial<Annotation>,
-  ) => {
-    setAnnotations((prev) => ({
-      ...prev,
-      [page]: (prev[page] || []).map((n) =>
-        n.id === id ? { ...n, ...updates } : n,
-      ),
-    }));
-  };
+  const updateNote = useCallback(
+    (page: number, id: number, updates: Partial<Annotation>) => {
+      setAnnotations((prev) => ({
+        ...prev,
+        [page]: (prev[page] || []).map((n) =>
+          n.id === id ? { ...n, ...updates } : n,
+        ),
+      }));
+    },
+    [],
+  );
 
-  const nudge = (dx: number, dy: number) => {
-    if (!selectedId) return;
+  const onTextUpdate = useCallback(
+    (id: number, text: string) => {
+      if (!selectedId) return;
+      updateNote(selectedId.page, id, { text });
+    },
+    [selectedId, updateNote],
+  );
+
+  const onTextCommit = useCallback(() => {
     takeSnapshot();
-    const note = annotations[selectedId.page]?.find(
-      (n) => n.id === selectedId.id,
-    );
-    if (note)
-      updateNote(selectedId.page, selectedId.id, {
-        x: note.x + dx,
-        y: note.y + dy,
-      });
-  };
+  }, [takeSnapshot]);
 
   const downloadPDF = async () => {
     if (!mergedBytes) return;
     setLoading(true);
     try {
-      const pdfLibDoc = await PDFDocument.load(mergedBytes.slice(0));
-      const pages = pdfLibDoc.getPages();
+      const doc = await PDFDocument.load(mergedBytes.slice(0));
+      const pages = doc.getPages();
       const hexToRgb = (hex: string) => {
-        const r = parseInt(hex.slice(1, 3), 16) / 255;
-        const g = parseInt(hex.slice(3, 5), 16) / 255;
-        const b = parseInt(hex.slice(5, 7), 16) / 255;
-        return rgb(r, g, b);
+        if (!hex || hex === "transparent") return null;
+        return rgb(
+          parseInt(hex.slice(1, 3), 16) / 255,
+          parseInt(hex.slice(3, 5), 16) / 255,
+          parseInt(hex.slice(5, 7), 16) / 255,
+        );
       };
       for (let i = 1; i <= totalPages; i++) {
-        const pdfPage = pages[i - 1];
-        const { height: pageHeight } = pdfPage.getSize();
+        const p = pages[i - 1];
+        const { height: ph } = p.getSize();
         (strokes[i] || []).forEach((s) => {
-          for (let j = 0; j < s.points.length - 1; j++) {
-            pdfPage.drawLine({
-              start: { x: s.points[j].x, y: pageHeight - s.points[j].y },
-              end: { x: s.points[j + 1].x, y: pageHeight - s.points[j + 1].y },
-              thickness: s.width,
-              color: hexToRgb(s.color),
+          const c = hexToRgb(s.color);
+          if (c)
+            for (let j = 0; j < s.points.length - 1; j++)
+              p.drawLine({
+                start: { x: s.points[j].x, y: ph - s.points[j].y },
+                end: { x: s.points[j + 1].x, y: ph - s.points[j + 1].y },
+                thickness: s.width,
+                color: c,
+              });
+        });
+        (annotations[i] || []).forEach((n) => {
+          const lh = n.fontSize * 1.2;
+          const rh = n.text.split("\n").length * lh + 10;
+          if (n.bgColor && n.bgColor !== "transparent") {
+            const bg = hexToRgb(n.bgColor);
+            if (bg)
+              p.drawRectangle({
+                x: n.x,
+                y: ph - n.y - rh + 5,
+                width: n.width,
+                height: rh,
+                color: bg,
+              });
+          }
+          const tc = hexToRgb(n.color || "#000000");
+          if (tc) {
+            let fontVariant;
+            if (n.isBold && n.isItalic)
+              fontVariant = StandardFonts.HelveticaBoldOblique;
+            else if (n.isBold) fontVariant = StandardFonts.HelveticaBold;
+            else if (n.isItalic)
+              fontVariant =
+                n.fontFamily === "TimesRoman"
+                  ? StandardFonts.TimesRomanItalic
+                  : StandardFonts.HelveticaOblique;
+            else
+              fontVariant =
+                n.fontFamily === "TimesRoman"
+                  ? StandardFonts.TimesRoman
+                  : StandardFonts.Helvetica;
+
+            p.drawText(n.text, {
+              x: n.x + 5,
+              y: ph - n.y - n.fontSize - 2,
+              size: n.fontSize,
+              color: tc,
+              font: doc.embedStandardFont(fontVariant as any),
+              maxWidth: n.width - 10,
+              lineHeight: lh,
             });
           }
         });
-        (annotations[i] || []).forEach((n) => {
-          let fontVariant;
-          if (n.isBold && n.isItalic)
-            fontVariant = StandardFonts.HelveticaBoldOblique;
-          else if (n.isBold) fontVariant = StandardFonts.HelveticaBold;
-          else if (n.isItalic)
-            fontVariant =
-              n.fontFamily === "TimesRoman"
-                ? StandardFonts.TimesRomanItalic
-                : StandardFonts.HelveticaOblique;
-          else
-            fontVariant =
-              n.fontFamily === "TimesRoman"
-                ? StandardFonts.TimesRoman
-                : StandardFonts.Helvetica;
-          pdfPage.drawText(n.text, {
-            x: n.x,
-            y: pageHeight - n.y - n.fontSize,
-            size: n.fontSize,
-            font: pdfLibDoc.embedStandardFont(fontVariant as any),
-            maxWidth: n.width,
-            color: hexToRgb(n.color || "#000000"),
-          });
-        });
       }
-      const bytes = await pdfLibDoc.save();
-      const freshBuffer = new ArrayBuffer(bytes.length);
-      const uint8View = new Uint8Array(freshBuffer);
-      uint8View.set(bytes);
-      const blob = new Blob([freshBuffer], { type: "application/pdf" });
-      const downloadUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = downloadUrl;
-      link.download = "Edited_Document.pdf";
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
-    } catch (err) {
-      console.error(err);
-      alert("Export failure");
+      const b = await doc.save();
+      const fb = new ArrayBuffer(b.length);
+      new Uint8Array(fb).set(b);
+      const url = URL.createObjectURL(
+        new Blob([fb], { type: "application/pdf" }),
+      );
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "Edited.pdf";
+      a.click();
+    } catch (e) {
+      console.error(e);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const onDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (over && active.id !== over.id) {
-      setUploadedFiles((items) => {
-        const oldIndex = items.findIndex((it) => it.id === active.id);
-        const newIndex = items.findIndex((it) => it.id === over.id);
-        if (oldIndex !== -1 && newIndex !== -1) {
-          return arrayMove(items, oldIndex, newIndex);
-        }
-        return items;
-      });
     }
   };
 
@@ -707,34 +756,21 @@ export default function EditPDFLite() {
     subText: darkMode ? "#86868b" : "#6e6e73",
     itemBg: darkMode ? "#2c2c2e" : "#ffffff",
     accent: "#0071e3",
-    dropOverlay: darkMode
-      ? "rgba(0, 113, 227, 0.15)"
-      : "rgba(0, 113, 227, 0.08)",
+    dropOverlay: "rgba(0, 113, 227, 0.1)",
   };
 
-  const toolBtnStyle = (active: boolean) => ({
-    padding: "6px 14px",
-    backgroundColor: active ? theme.accent : "transparent",
-    color: active ? "#ffffff" : theme.text,
-    border: `1px solid ${active ? theme.accent : theme.border}`,
-    borderRadius: "6px",
-    fontSize: "12px",
-    fontWeight: 500,
-    cursor: "pointer",
-    transition: "all 0.15s ease",
-  });
+  const selectedNoteObj = selectedId
+    ? annotations[selectedId.page]?.find((n) => n.id === selectedId.id)
+    : null;
 
-  const iconBtnBase = (disabled?: boolean) => ({
-    padding: "6px",
-    background: "none",
-    border: "none",
-    color: disabled ? theme.subText : theme.text,
-    cursor: disabled ? "default" : "pointer",
-    opacity: disabled ? 0.4 : 1,
-    borderRadius: "4px",
-    display: "flex",
-    alignItems: "center",
-  });
+  const nudge = (dx: number, dy: number) => {
+    if (!selectedId || !selectedNoteObj) return;
+    takeSnapshot();
+    updateNote(selectedId.page, selectedId.id, {
+      x: selectedNoteObj.x + dx,
+      y: selectedNoteObj.y + dy,
+    });
+  };
 
   const ColorSwatch = ({
     color,
@@ -751,19 +787,34 @@ export default function EditPDFLite() {
       style={{
         width: "20px",
         height: "20px",
-        backgroundColor: color,
+        backgroundColor: color === "transparent" ? "transparent" : color,
         borderRadius: "50%",
-        border: `2px solid ${active ? theme.accent : "transparent"}`,
+        border:
+          color === "transparent"
+            ? "1px solid #ccc"
+            : `2px solid ${active ? theme.accent : "transparent"}`,
         boxShadow: `inset 0 0 0 1px rgba(0,0,0,0.1)`,
         cursor: "pointer",
         padding: 0,
+        position: "relative",
+        overflow: "hidden",
       }}
-    />
+    >
+      {color === "transparent" && (
+        <div
+          style={{
+            position: "absolute",
+            top: "50%",
+            left: 0,
+            width: "100%",
+            height: "1px",
+            background: "red",
+            transform: "rotate(45deg)",
+          }}
+        />
+      )}
+    </button>
   );
-
-  const currentPreviewFile = uploadedFiles.find((f) => f.id === selectedFileId);
-
-  if (!mounted) return null;
 
   return (
     <div
@@ -773,59 +824,48 @@ export default function EditPDFLite() {
         height: "100vh",
         backgroundColor: theme.bg,
         color: theme.text,
-        fontFamily:
-          '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+        fontFamily: "sans-serif",
       }}
-      onDragEnter={onDragEnter}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
+      onDragEnter={(e) => {
+        e.preventDefault();
+        dragCounter.current++;
+        setIsDraggingOver(true);
+      }}
+      onDragOver={(e) => e.preventDefault()}
+      onDragLeave={(e) => {
+        dragCounter.current--;
+        if (dragCounter.current === 0) setIsDraggingOver(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setIsDraggingOver(false);
+        dragCounter.current = 0;
+        if (e.dataTransfer.files) handleFileProcess(e.dataTransfer.files);
+      }}
     >
-      {/* DRAG OVERLAY */}
       {isDraggingOver && !pdfDoc && (
         <div
           style={{
             position: "fixed",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
+            inset: 0,
             zIndex: 9999,
             backgroundColor: theme.dropOverlay,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             backdropFilter: "blur(4px)",
-            pointerEvents: "none",
           }}
         >
           <div
             style={{
-              padding: "40px 60px",
+              padding: "40px",
               borderRadius: "20px",
               border: `2px dashed ${theme.accent}`,
               backgroundColor: theme.uiBg,
-              boxShadow: "0 20px 40px rgba(0,0,0,0.1)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: "16px",
             }}
           >
-            <svg
-              width="48"
-              height="48"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke={theme.accent}
-              strokeWidth="1.5"
-            >
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            <div
-              style={{ fontSize: "20px", fontWeight: 600, color: theme.text }}
-            >
-              Drop to add PDFs
+            <div style={{ fontSize: "20px", fontWeight: 600 }}>
+              Drop PDFs or Images
             </div>
           </div>
         </div>
@@ -833,47 +873,58 @@ export default function EditPDFLite() {
 
       <header
         style={{
+          height: "52px",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          height: "52px",
           padding: "0 16px",
           backgroundColor: theme.uiBg,
           borderBottom: `1px solid ${theme.border}`,
           zIndex: 100,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-          <div style={{ fontWeight: 600, fontSize: "14px" }}>PDF Studio</div>
+        <div style={{ display: "flex", gap: "16px", alignItems: "center" }}>
+          <div style={{ fontWeight: 600 }}>PDF Studio</div>
           {pdfDoc && (
             <div
               style={{
                 display: "flex",
-                backgroundColor: darkMode ? "#3a3a3c" : "#e8e8ed",
-                padding: "3px",
+                background: darkMode ? "#3a3a3c" : "#e8e8ed",
+                padding: "2px",
                 borderRadius: "8px",
-                gap: "2px",
               }}
             >
               <button
-                type="button"
                 onClick={() => {
                   setIsDrawMode(true);
                   setIsAddTextMode(false);
-                  setSelectedId(null);
                 }}
-                style={toolBtnStyle(isDrawMode && !isAddTextMode) as any}
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: "6px",
+                  border: "none",
+                  fontSize: "12px",
+                  background: isDrawMode ? theme.accent : "transparent",
+                  color: isDrawMode ? "#fff" : theme.text,
+                  cursor: "pointer",
+                }}
               >
                 Markup
               </button>
               <button
-                type="button"
                 onClick={() => {
                   setIsAddTextMode(true);
                   setIsDrawMode(false);
-                  setSelectedId(null);
                 }}
-                style={toolBtnStyle(isAddTextMode) as any}
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: "6px",
+                  border: "none",
+                  fontSize: "12px",
+                  background: isAddTextMode ? theme.accent : "transparent",
+                  color: isAddTextMode ? "#fff" : theme.text,
+                  cursor: "pointer",
+                }}
               >
                 Text
               </button>
@@ -881,64 +932,80 @@ export default function EditPDFLite() {
           )}
           <input
             type="file"
-            id="pdf-upload-input"
             multiple
             hidden
-            accept="application/pdf"
+            id="f-in"
+            accept=".pdf,.jpg,.jpeg,.png"
             onChange={(e) =>
               e.target.files && handleFileProcess(e.target.files)
             }
           />
-          <label htmlFor="pdf-upload-input" style={toolBtnStyle(false) as any}>
+          <label
+            htmlFor="f-in"
+            style={{
+              padding: "6px 12px",
+              borderRadius: "6px",
+              border: `1px solid ${theme.border}`,
+              fontSize: "12px",
+              cursor: "pointer",
+            }}
+          >
             Add Files
           </label>
         </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
           {pdfDoc && (
             <div
               style={{
                 display: "flex",
-                gap: "4px",
-                paddingRight: "8px",
+                gap: "8px",
                 borderRight: `1px solid ${theme.border}`,
+                paddingRight: "12px",
               }}
             >
               <button
-                onClick={undo}
                 disabled={past.length === 0}
-                style={iconBtnBase(past.length === 0) as any}
-                title="Undo"
+                onClick={() => {
+                  const p = past[past.length - 1];
+                  setFuture((f) => [
+                    deepCloneState({ strokes, annotations }),
+                    ...f,
+                  ]);
+                  setPast((prev) => prev.slice(0, -1));
+                  setStrokes(p.strokes);
+                  setAnnotations(p.annotations);
+                }}
+                style={{
+                  opacity: past.length ? 1 : 0.4,
+                  border: "none",
+                  background: "none",
+                  color: theme.text,
+                  cursor: "pointer",
+                }}
               >
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                >
-                  <path d="M9 14L4 9l5-5" />
-                  <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H13" />
-                </svg>
+                Undo
               </button>
               <button
-                onClick={redo}
                 disabled={future.length === 0}
-                style={iconBtnBase(future.length === 0) as any}
-                title="Redo"
+                onClick={() => {
+                  const n = future[0];
+                  setPast((p) => [
+                    ...p,
+                    deepCloneState({ strokes, annotations }),
+                  ]);
+                  setFuture((prev) => prev.slice(1));
+                  setStrokes(n.strokes);
+                  setAnnotations(n.annotations);
+                }}
+                style={{
+                  opacity: future.length ? 1 : 0.4,
+                  border: "none",
+                  background: "none",
+                  color: theme.text,
+                  cursor: "pointer",
+                }}
               >
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                >
-                  <path d="M15 14l5-5-5-5" />
-                  <path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H11" />
-                </svg>
+                Redo
               </button>
             </div>
           )}
@@ -947,93 +1014,78 @@ export default function EditPDFLite() {
               style={{
                 display: "flex",
                 alignItems: "center",
-                gap: "4px",
-                backgroundColor: darkMode ? "#3a3a3c" : "#f2f2f7",
+                background: darkMode ? "#3a3a3c" : "#f2f2f7",
                 borderRadius: "6px",
-                padding: "2px 4px",
+                padding: "2px 8px",
               }}
             >
               <button
-                type="button"
-                style={iconBtnBase() as any}
-                onClick={() => setZoom((z) => Math.max(z - 0.1, 0.5))}
+                onClick={() =>
+                  setZoom((z) => Math.max(z - ZOOM_STEP, MIN_EDITOR_ZOOM))
+                }
+                style={{
+                  border: "none",
+                  background: "none",
+                  color: theme.text,
+                  cursor: "pointer",
+                }}
               >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                >
-                  <path d="M5 12h14" />
-                </svg>
+                -
               </button>
               <span
                 style={{
                   fontSize: "11px",
-                  fontWeight: 600,
-                  minWidth: "35px",
+                  minWidth: "40px",
                   textAlign: "center",
                 }}
               >
                 {Math.round(zoom * 100)}%
               </span>
               <button
-                type="button"
-                style={iconBtnBase() as any}
-                onClick={() => setZoom((z) => z + 0.1)}
+                onClick={() =>
+                  setZoom((z) => Math.min(z + ZOOM_STEP, MAX_EDITOR_ZOOM))
+                }
+                style={{
+                  border: "none",
+                  background: "none",
+                  color: theme.text,
+                  cursor: "pointer",
+                }}
               >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                >
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
+                +
               </button>
             </div>
           )}
           <button
-            type="button"
-            onClick={toggleDarkMode}
-            style={iconBtnBase() as any}
+            onClick={() => {
+              setDarkMode(!darkMode);
+              localStorage.setItem(
+                "pdf-studio-theme",
+                !darkMode ? "dark" : "light",
+              );
+            }}
+            style={{
+              border: "none",
+              background: "none",
+              color: theme.text,
+              cursor: "pointer",
+            }}
           >
-            {darkMode ? (
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <circle cx="12" cy="12" r="5" />
-                <path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-              </svg>
-            ) : (
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
-            )}
+            {darkMode ? "Light" : "Dark"}
           </button>
           {pdfDoc && (
             <button
-              type="button"
               onClick={downloadPDF}
-              style={toolBtnStyle(true) as any}
+              style={{
+                padding: "6px 12px",
+                background: theme.accent,
+                color: "#fff",
+                border: "none",
+                borderRadius: "6px",
+                cursor: "pointer",
+              }}
             >
-              Export PDF
+              Export
             </button>
           )}
         </div>
@@ -1045,27 +1097,35 @@ export default function EditPDFLite() {
             width: "260px",
             borderRight: `1px solid ${theme.border}`,
             backgroundColor: theme.sidebarBg,
+            padding: "16px",
             display: "flex",
             flexDirection: "column",
-            padding: "16px",
           }}
         >
           <div
             style={{
               fontSize: "11px",
               fontWeight: 700,
-              color: theme.subText,
-              textTransform: "uppercase",
+              opacity: 0.6,
               marginBottom: "12px",
             }}
           >
-            Document Queue
+            QUEUE
           </div>
-          <div style={{ flex: 1, overflowY: "auto", marginBottom: "16px" }}>
+          <div style={{ flex: 1, overflowY: "auto" }}>
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
-              onDragEnd={onDragEnd}
+              onDragEnd={(e) => {
+                if (e.over && e.active.id !== e.over.id)
+                  setUploadedFiles((f) =>
+                    arrayMove(
+                      f,
+                      f.findIndex((x) => x.id === e.active.id),
+                      f.findIndex((x) => x.id === e.over.id),
+                    ),
+                  );
+              }}
             >
               <SortableContext
                 items={uploadedFiles.map((f) => f.id)}
@@ -1079,9 +1139,7 @@ export default function EditPDFLite() {
                     isSelected={selectedFileId === f.id}
                     onSelect={() => setSelectedFileId(f.id)}
                     onRemove={() =>
-                      setUploadedFiles((prev) =>
-                        prev.filter((x) => x.id !== f.id),
-                      )
+                      setUploadedFiles((p) => p.filter((x) => x.id !== f.id))
                     }
                     theme={theme}
                   />
@@ -1090,38 +1148,32 @@ export default function EditPDFLite() {
             </DndContext>
           </div>
           <button
-            type="button"
             onClick={mergeAndLoad}
             disabled={uploadedFiles.length === 0 || loading}
             style={{
-              width: "100%",
+              marginTop: "16px",
               padding: "12px",
-              backgroundColor:
-                uploadedFiles.length > 0 ? theme.text : theme.border,
+              background: theme.text,
               color: theme.uiBg,
               border: "none",
               borderRadius: "8px",
-              fontSize: "13px",
               fontWeight: 600,
-              cursor:
-                uploadedFiles.length > 0 && !loading ? "pointer" : "default",
-              opacity: loading ? 0.7 : 1,
+              cursor: "pointer",
             }}
           >
-            {loading ? "Processing..." : "Merge & Edit"}
+            {loading ? "..." : "Merge & Edit"}
           </button>
         </aside>
 
         <main
           style={{
             flex: 1,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
+            overflowY: "auto",
             position: "relative",
+            backgroundColor: theme.bg,
           }}
         >
-          {pdfDoc && (isDrawMode || selectedNote) && (
+          {pdfDoc && (isDrawMode || selectedNoteObj) && (
             <div
               style={{
                 position: "absolute",
@@ -1129,19 +1181,18 @@ export default function EditPDFLite() {
                 left: "50%",
                 transform: "translateX(-50%)",
                 zIndex: 1000,
-                height: "48px",
-                backgroundColor: theme.toolbarBg,
-                backdropFilter: "blur(20px)",
+                background: theme.toolbarBg,
+                backdropFilter: "blur(10px)",
                 border: `1px solid ${theme.border}`,
-                display: "flex",
-                alignItems: "center",
-                padding: "0 16px",
-                gap: "16px",
                 borderRadius: "12px",
+                padding: "8px 16px",
+                display: "flex",
+                gap: "16px",
+                alignItems: "center",
                 boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
               }}
             >
-              {isDrawMode && !selectedNote && (
+              {isDrawMode && !selectedNoteObj && (
                 <div
                   style={{ display: "flex", gap: "12px", alignItems: "center" }}
                 >
@@ -1151,10 +1202,7 @@ export default function EditPDFLite() {
                         key={c}
                         color={c}
                         active={strokeColor === c}
-                        onClick={() => {
-                          takeSnapshot();
-                          setStrokeColor(c);
-                        }}
+                        onClick={() => setStrokeColor(c)}
                       />
                     ))}
                   </div>
@@ -1170,41 +1218,38 @@ export default function EditPDFLite() {
                     min="1"
                     max="15"
                     value={strokeWidth}
-                    onMouseDown={() => takeSnapshot()}
                     onChange={(e) => setStrokeWidth(parseInt(e.target.value))}
-                    style={{ width: "60px", accentColor: theme.accent }}
+                    style={{ width: "60px" }}
                   />
                   <span
-                    style={{
-                      fontSize: "11px",
-                      fontWeight: 600,
-                      color: theme.subText,
-                      width: "30px",
-                    }}
+                    style={{ fontSize: "11px", fontWeight: 600, width: "30px" }}
                   >
                     {strokeWidth}px
                   </span>
                 </div>
               )}
-              {selectedNote && (
+
+              {selectedNoteObj && (
                 <div
-                  style={{ display: "flex", gap: "12px", alignItems: "center" }}
+                  style={{
+                    display: "flex",
+                    gap: "12px",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                  }}
                 >
                   <select
-                    value={selectedNote.fontFamily}
-                    onMouseDown={() => takeSnapshot()}
-                    onChange={(e) =>
+                    value={selectedNoteObj.fontFamily}
+                    onChange={(e) => {
+                      takeSnapshot();
                       updateNote(selectedId!.page, selectedId!.id, {
                         fontFamily: e.target.value,
-                      })
-                    }
+                      });
+                    }}
                     style={{
                       fontSize: "12px",
                       padding: "4px",
-                      borderRadius: "6px",
-                      border: `1px solid ${theme.border}`,
-                      background: theme.itemBg,
-                      color: theme.text,
+                      borderRadius: "4px",
                     }}
                   >
                     <option value="Helvetica">Sans</option>
@@ -1212,20 +1257,14 @@ export default function EditPDFLite() {
                   </select>
                   <input
                     type="number"
-                    value={selectedNote.fontSize}
-                    onMouseDown={() => takeSnapshot()}
-                    onChange={(e) =>
+                    value={selectedNoteObj.fontSize}
+                    onChange={(e) => {
+                      takeSnapshot();
                       updateNote(selectedId!.page, selectedId!.id, {
                         fontSize: parseInt(e.target.value),
-                      })
-                    }
-                    style={{
-                      width: "40px",
-                      fontSize: "12px",
-                      border: `1px solid ${theme.border}`,
-                      borderRadius: "4px",
-                      textAlign: "center",
+                      });
                     }}
+                    style={{ width: "40px", fontSize: "12px", padding: "4px" }}
                   />
                   <div
                     style={{
@@ -1239,19 +1278,19 @@ export default function EditPDFLite() {
                       onClick={() => {
                         takeSnapshot();
                         updateNote(selectedId!.page, selectedId!.id, {
-                          isBold: !selectedNote.isBold,
+                          isBold: !selectedNoteObj.isBold,
                         });
                       }}
-                      style={
-                        {
-                          ...iconBtnBase(),
-                          padding: "4px 10px",
-                          backgroundColor: selectedNote.isBold
-                            ? theme.border
-                            : "transparent",
-                          borderRadius: 0,
-                        } as any
-                      }
+                      style={{
+                        padding: "4px 8px",
+                        background: selectedNoteObj.isBold
+                          ? theme.border
+                          : "transparent",
+                        border: "none",
+                        fontSize: "12px",
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
                     >
                       B
                     </button>
@@ -1259,19 +1298,19 @@ export default function EditPDFLite() {
                       onClick={() => {
                         takeSnapshot();
                         updateNote(selectedId!.page, selectedId!.id, {
-                          isItalic: !selectedNote.isItalic,
+                          isItalic: !selectedNoteObj.isItalic,
                         });
                       }}
-                      style={
-                        {
-                          ...iconBtnBase(),
-                          padding: "4px 10px",
-                          backgroundColor: selectedNote.isItalic
-                            ? theme.border
-                            : "transparent",
-                          borderRadius: 0,
-                        } as any
-                      }
+                      style={{
+                        padding: "4px 8px",
+                        background: selectedNoteObj.isItalic
+                          ? theme.border
+                          : "transparent",
+                        border: "none",
+                        fontSize: "12px",
+                        fontStyle: "italic",
+                        cursor: "pointer",
+                      }}
                     >
                       I
                     </button>
@@ -1280,30 +1319,37 @@ export default function EditPDFLite() {
                     style={{
                       display: "flex",
                       alignItems: "center",
-                      gap: "8px",
+                      gap: "6px",
                     }}
                   >
-                    <span style={{ fontSize: "10px", fontWeight: 800 }}>W</span>
+                    <span style={{ fontSize: "10px", fontWeight: 700 }}>W</span>
                     <input
                       type="range"
                       min="50"
                       max="600"
-                      value={selectedNote.width}
-                      onMouseDown={() => takeSnapshot()}
-                      onChange={(e) =>
+                      value={selectedNoteObj.width}
+                      onChange={(e) => {
+                        takeSnapshot();
                         updateNote(selectedId!.page, selectedId!.id, {
                           width: parseInt(e.target.value),
-                        })
-                      }
-                      style={{ width: "80px", accentColor: theme.accent }}
+                        });
+                      }}
+                      style={{ width: "60px" }}
                     />
                   </div>
-                  <div style={{ display: "flex", gap: "6px" }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "4px",
+                      alignItems: "center",
+                    }}
+                  >
+                    <span style={{ fontSize: "10px", fontWeight: 700 }}>T</span>
                     {PRESET_COLORS.slice(0, 3).map((c) => (
                       <ColorSwatch
                         key={c}
                         color={c}
-                        active={selectedNote.color === c}
+                        active={selectedNoteObj.color === c}
                         onClick={() => {
                           takeSnapshot();
                           updateNote(selectedId!.page, selectedId!.id, {
@@ -1313,99 +1359,105 @@ export default function EditPDFLite() {
                       />
                     ))}
                   </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "4px",
+                      alignItems: "center",
+                    }}
+                  >
+                    <span style={{ fontSize: "10px", fontWeight: 700 }}>F</span>
+                    <ColorSwatch
+                      color="transparent"
+                      active={selectedNoteObj.bgColor === "transparent"}
+                      onClick={() => {
+                        takeSnapshot();
+                        updateNote(selectedId!.page, selectedId!.id, {
+                          bgColor: "transparent",
+                        });
+                      }}
+                    />
+                    {PRESET_COLORS.slice(1, 4).map((c) => (
+                      <ColorSwatch
+                        key={c}
+                        color={c}
+                        active={selectedNoteObj.bgColor === c}
+                        onClick={() => {
+                          takeSnapshot();
+                          updateNote(selectedId!.page, selectedId!.id, {
+                            bgColor: c,
+                          });
+                        }}
+                      />
+                    ))}
+                  </div>
                   <div style={{ display: "flex", gap: "2px" }}>
                     <button
                       onClick={() => nudge(0, -2)}
-                      style={iconBtnBase() as any}
+                      style={{
+                        border: "none",
+                        background: "none",
+                        cursor: "pointer",
+                        fontSize: "14px",
+                      }}
                     >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="3"
-                      >
-                        <path d="M18 15l-6-6-6 6" />
-                      </svg>
+                      ↑
                     </button>
                     <button
                       onClick={() => nudge(0, 2)}
-                      style={iconBtnBase() as any}
+                      style={{
+                        border: "none",
+                        background: "none",
+                        cursor: "pointer",
+                        fontSize: "14px",
+                      }}
                     >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="3"
-                      >
-                        <path d="M6 9l6 6 6-6" />
-                      </svg>
+                      ↓
                     </button>
                     <button
                       onClick={() => nudge(-2, 0)}
-                      style={iconBtnBase() as any}
+                      style={{
+                        border: "none",
+                        background: "none",
+                        cursor: "pointer",
+                        fontSize: "14px",
+                      }}
                     >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="3"
-                      >
-                        <path d="M15 18l-6-6 6-6" />
-                      </svg>
+                      ←
                     </button>
                     <button
                       onClick={() => nudge(2, 0)}
-                      style={iconBtnBase() as any}
+                      style={{
+                        border: "none",
+                        background: "none",
+                        cursor: "pointer",
+                        fontSize: "14px",
+                      }}
                     >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="3"
-                      >
-                        <path d="M9 18l6-6-6-6" />
-                      </svg>
+                      →
                     </button>
                   </div>
                   <button
                     onClick={() => {
-                      if (selectedId) {
-                        takeSnapshot();
-                        setAnnotations((prev) => ({
-                          ...prev,
-                          [selectedId.page]: prev[selectedId.page].filter(
-                            (n) => n.id !== selectedId.id,
-                          ),
-                        }));
-                        setSelectedId(null);
-                      }
+                      takeSnapshot();
+                      setAnnotations((p) => ({
+                        ...p,
+                        [selectedId!.page]: p[selectedId!.page].filter(
+                          (n) => n.id !== selectedId!.id,
+                        ),
+                      }));
+                      setSelectedId(null);
                     }}
-                    style={
-                      {
-                        ...iconBtnBase(),
-                        color: "#e02020",
-                        marginLeft: "4px",
-                      } as any
-                    }
+                    style={{
+                      color: "red",
+                      border: "none",
+                      background: "none",
+                      cursor: "pointer",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                    }}
                   >
-                    <svg
-                      width="16"
-                      height="16"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.1"
-                    >
-                      <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                    </svg>
+                    Delete
                   </button>
                 </div>
               )}
@@ -1414,8 +1466,6 @@ export default function EditPDFLite() {
 
           <div
             style={{
-              flex: 1,
-              overflow: "auto",
               padding: pdfDoc ? "80px 40px" : "40px",
               display: "flex",
               flexDirection: "column",
@@ -1423,321 +1473,198 @@ export default function EditPDFLite() {
             }}
           >
             {!pdfDoc ? (
-              <div
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  display: "flex",
-                  flexDirection: "column",
-                }}
-              >
-                {uploadedFiles.length === 0 ? (
-                  <div
-                    style={{
-                      flex: 1,
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      color: theme.subText,
-                      border: isDraggingOver
-                        ? `2px dashed ${theme.accent}`
-                        : "2px dashed transparent",
-                      borderRadius: "24px",
-                      margin: "20px",
-                      transition: "all 0.2s ease",
-                      backgroundColor: isDraggingOver
-                        ? theme.dropOverlay
-                        : "transparent",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: "64px",
-                        height: "64px",
-                        borderRadius: "16px",
-                        backgroundColor: darkMode ? "#2c2c2e" : "#e8e8ed",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        marginBottom: "20px",
-                      }}
-                    >
-                      <svg
-                        width="32"
-                        height="32"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.5"
-                      >
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                        <polyline points="14 2 14 8 20 8" />
-                        <line x1="12" y1="18" x2="12" y2="12" />
-                        <polyline points="9 15 12 12 15 15" />
-                      </svg>
-                    </div>
-                    <div
-                      style={{
-                        fontSize: "17px",
-                        fontWeight: 600,
-                        color: theme.text,
-                        marginBottom: "4px",
-                      }}
-                    >
-                      {isDraggingOver ? "Drop to add" : "No documents selected"}
-                    </div>
-                    <div style={{ fontSize: "14px" }}>
-                      Drag and drop PDF files or use the Add button
-                    </div>
+              uploadedFiles.length === 0 ? (
+                <div
+                  style={{
+                    flex: 1,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    marginTop: "100px",
+                    opacity: 0.5,
+                  }}
+                >
+                  <div style={{ fontSize: "17px", fontWeight: 600 }}>
+                    No documents selected
                   </div>
-                ) : (
-                  <div style={{ width: "100%", padding: "40px 20px" }}>
-                    {currentPreviewFile && (
-                      <SelectedFilePreview
-                        file={currentPreviewFile}
-                        pdfjs={pdfjs}
-                        theme={theme}
-                      />
+                  <div style={{ fontSize: "14px" }}>
+                    Drag PDFs or Images here
+                  </div>
+                </div>
+              ) : (
+                uploadedFiles.find((f: any) => f.id === selectedFileId) && (
+                  <SelectedFilePreview
+                    file={uploadedFiles.find(
+                      (f: any) => f.id === selectedFileId,
                     )}
-                  </div>
-                )}
-              </div>
+                    pdfjs={pdfjs}
+                    theme={theme}
+                  />
+                )
+              )
             ) : (
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "40px",
-                  alignItems: "center",
-                }}
-              >
-                {Array.from({ length: totalPages }, (_, i) => i + 1).map(
-                  (pageNum) => (
-                    <div
-                      key={pageNum}
-                      style={{ position: "relative" }}
-                      onMouseMove={(e) => {
-                        if (isDrawing && isDrawMode) {
-                          const rect =
-                            canvasRefs.current[
-                              pageNum
-                            ]!.getBoundingClientRect();
-                          setStrokes((prev) => {
-                            const pageStrokes = [...(prev[pageNum] || [])];
-                            if (pageStrokes.length > 0)
-                              pageStrokes[pageStrokes.length - 1].points.push({
-                                x: (e.clientX - rect.left) / zoom,
-                                y: (e.clientY - rect.top) / zoom,
-                              });
-                            return { ...prev, [pageNum]: pageStrokes };
-                          });
-                          redrawStrokes(pageNum);
-                        }
-                        if (
-                          isDraggingText &&
-                          selectedId &&
-                          selectedId.page === pageNum
-                        ) {
-                          const rect =
-                            canvasRefs.current[
-                              pageNum
-                            ]!.getBoundingClientRect();
-                          updateNote(pageNum, selectedId.id, {
-                            x: (e.clientX - rect.left - dragOffset.x) / zoom,
-                            y: (e.clientY - rect.top - dragOffset.y) / zoom,
-                          });
-                        }
-                      }}
-                      onMouseUp={() => {
-                        if (isDrawing || isDraggingText) takeSnapshot();
-                        setIsDrawing(false);
-                        setIsDraggingText(false);
-                      }}
-                    >
-                      <div
-                        style={{
-                          position: "absolute",
-                          top: "-28px",
-                          left: "0",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "10px",
-                          width: "100%",
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontSize: "11px",
-                            fontWeight: 700,
-                            color: theme.subText,
-                            textTransform: "uppercase",
-                          }}
-                        >
-                          Page {pageNum}
-                        </span>
-                      </div>
-                      <div
-                        onMouseDown={(e) => {
-                          const rect =
-                            canvasRefs.current[
-                              pageNum
-                            ]!.getBoundingClientRect();
-                          const x = (e.clientX - rect.left) / zoom;
-                          const y = (e.clientY - rect.top) / zoom;
-                          if (isDrawMode) {
-                            takeSnapshot();
-                            setIsDrawing(true);
-                            setStrokes((prev) => ({
-                              ...prev,
-                              [pageNum]: [
-                                ...(prev[pageNum] || []),
-                                {
-                                  points: [{ x, y }],
-                                  color: strokeColor,
-                                  width: strokeWidth,
-                                },
-                              ],
-                            }));
-                          } else if (isAddTextMode) {
-                            takeSnapshot();
-                            const n: Annotation = {
-                              id: Date.now(),
-                              text: "Edit text",
+              Array.from({ length: totalPages }, (_, i) => i + 1).map(
+                (pageNum) => (
+                  <div
+                    key={pageNum}
+                    style={{
+                      position: "relative",
+                      marginBottom: "40px",
+                      touchAction: "none",
+                    }}
+                    onMouseMove={(e) => {
+                      const pdfCanvas = canvasRefs.current[pageNum];
+                      if (!pdfCanvas) return;
+
+                      if (isDrawing && isDrawMode) {
+                        const rect = pdfCanvas.getBoundingClientRect();
+                        setStrokes((prev) => {
+                          const s = [...(prev[pageNum] || [])];
+                          if (s.length) {
+                            s[s.length - 1].points.push({
+                              x: (e.clientX - rect.left) / zoom,
+                              y: (e.clientY - rect.top) / zoom,
+                            });
+                          }
+                          return { ...prev, [pageNum]: s };
+                        });
+                      }
+                      if (isDraggingText && selectedId?.page === pageNum) {
+                        const rect = pdfCanvas.getBoundingClientRect();
+                        updateNote(pageNum, selectedId.id, {
+                          x: (e.clientX - rect.left - dragOffset.x) / zoom,
+                          y: (e.clientY - rect.top - dragOffset.y) / zoom,
+                        });
+                      }
+                    }}
+                    onMouseUp={() => {
+                      if (isDrawing || isDraggingText) takeSnapshot();
+                      setIsDrawing(false);
+                      setIsDraggingText(false);
+                    }}
+                    onMouseDown={(e) => {
+                      const pdfCanvas = canvasRefs.current[pageNum];
+                      if (!pdfCanvas) return;
+
+                      const rect = pdfCanvas.getBoundingClientRect();
+                      const x = (e.clientX - rect.left) / zoom;
+                      const y = (e.clientY - rect.top) / zoom;
+
+                      if (isDrawMode) {
+                        takeSnapshot();
+                        setIsDrawing(true);
+                        setStrokes((p) => ({
+                          ...p,
+                          [pageNum]: [
+                            ...(p[pageNum] || []),
+                            {
+                              points: [{ x, y }],
+                              color: strokeColor,
+                              width: strokeWidth,
+                            },
+                          ],
+                        }));
+                      } else if (isAddTextMode) {
+                        takeSnapshot();
+                        const id = Date.now();
+                        setAnnotations((p) => ({
+                          ...p,
+                          [pageNum]: [
+                            ...(p[pageNum] || []),
+                            {
+                              id,
+                              text: "New Text",
                               x,
                               y,
                               width: 150,
                               fontSize: 14,
                               color: "#1d1d1f",
-                              bgColor: "",
+                              bgColor: "transparent",
                               textAlign: "left",
                               fontFamily: "Helvetica",
                               isBold: false,
                               isItalic: false,
-                            };
-                            setAnnotations((prev) => ({
-                              ...prev,
-                              [pageNum]: [...(prev[pageNum] || []), n],
-                            }));
-                            setSelectedId({ id: n.id, page: pageNum });
-                            setIsAddTextMode(false);
-                          }
-                        }}
+                            },
+                          ],
+                        }));
+                        setSelectedId({ id, page: pageNum });
+                        setIsAddTextMode(false);
+                      }
+                    }}
+                  >
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: "-25px",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        opacity: 0.5,
+                      }}
+                    >
+                      PAGE {pageNum}
+                    </div>
+                    <div
+                      style={{
+                        position: "relative",
+                        background: "#fff",
+                        boxShadow: "0 10px 30px rgba(0,0,0,0.1)",
+                        cursor: isDrawMode
+                          ? "crosshair"
+                          : isAddTextMode
+                            ? "text"
+                            : "default",
+                      }}
+                    >
+                      <PdfPageCanvas
+                        pageNum={pageNum}
+                        pdfDoc={pdfDoc}
+                        zoom={zoom}
+                        canvasRefs={canvasRefs}
+                      />
+                      <StrokeCanvas
+                        pageNum={pageNum}
+                        strokes={strokes[pageNum] || []}
+                        zoom={zoom}
+                        drawCanvasRefs={drawCanvasRefs}
+                        pdfCanvas={canvasRefs.current[pageNum]}
+                      />
+                      <div
                         style={{
-                          position: "relative",
-                          backgroundColor: "#fff",
-                          cursor: isDrawMode
-                            ? "crosshair"
-                            : isAddTextMode
-                              ? "text"
-                              : "default",
-                          boxShadow:
-                            "0 10px 30px rgba(0,0,0,0.12), 0 1px 4px rgba(0,0,0,0.04)",
-                          border: `1px solid ${theme.border}`,
-                          borderRadius: "2px",
+                          position: "absolute",
+                          inset: 0,
+                          zIndex: 10,
+                          pointerEvents: isDrawMode ? "none" : "auto",
                         }}
                       >
-                        <canvas
-                          ref={(el) => {
-                            canvasRefs.current[pageNum] = el;
-                          }}
-                          style={{ display: "block" }}
-                        />
-                        <canvas
-                          ref={(el) => {
-                            drawCanvasRefs.current[pageNum] = el;
-                          }}
-                          style={{
-                            position: "absolute",
-                            top: 0,
-                            left: 0,
-                            pointerEvents: "none",
-                            zIndex: 5,
-                          }}
-                        />
-                        <div
-                          style={{
-                            position: "absolute",
-                            top: 0,
-                            left: 0,
-                            width: "100%",
-                            height: "100%",
-                            zIndex: 10,
-                          }}
-                        >
-                          {(annotations[pageNum] || []).map((n) => (
-                            <div
-                              key={n.id}
-                              onMouseDown={(e) => {
-                                e.stopPropagation();
-                                takeSnapshot();
-                                setSelectedId({ id: n.id, page: pageNum });
-                                setIsDraggingText(true);
-                                const rect =
-                                  e.currentTarget.getBoundingClientRect();
-                                setDragOffset({
-                                  x: e.clientX - rect.left,
-                                  y: e.clientY - rect.top,
-                                });
-                              }}
-                              style={{
-                                position: "absolute",
-                                left: n.x * zoom,
-                                top: n.y * zoom,
-                                width: n.width * zoom,
-                                border:
-                                  selectedId?.id === n.id
-                                    ? `2px solid ${theme.accent}`
-                                    : "1px dashed #d2d2d7",
-                                cursor: "move",
-                                borderRadius: "2px",
-                              }}
-                            >
-                              <textarea
-                                value={n.text}
-                                onFocus={() => {
-                                  setSelectedId({ id: n.id, page: pageNum });
-                                }}
-                                onBlur={() => {
-                                  if (
-                                    n.text !==
-                                    past[past.length - 1]?.annotations[
-                                      pageNum
-                                    ]?.find((a) => a.id === n.id)?.text
-                                  )
-                                    takeSnapshot();
-                                }}
-                                onChange={(e) =>
-                                  updateNote(pageNum, n.id, {
-                                    text: e.target.value,
-                                  })
-                                }
-                                onMouseDown={(e) => e.stopPropagation()}
-                                style={{
-                                  width: "100%",
-                                  background: "transparent",
-                                  border: "none",
-                                  outline: "none",
-                                  resize: "none",
-                                  fontSize: `${n.fontSize * zoom}px`,
-                                  fontFamily: n.fontFamily,
-                                  fontWeight: n.isBold ? "bold" : "normal",
-                                  fontStyle: n.isItalic ? "italic" : "normal",
-                                  color: n.color || "#1d1d1f",
-                                  padding: "4px",
-                                  display: "block",
-                                  overflow: "hidden",
-                                }}
-                                rows={n.text.split("\n").length || 1}
-                              />
-                            </div>
-                          ))}
-                        </div>
+                        {(annotations[pageNum] || []).map((n) => (
+                          <TextAnnotation
+                            key={n.id}
+                            annotation={n}
+                            zoom={zoom}
+                            isSelected={selectedId?.id === n.id}
+                            onSelect={() =>
+                              setSelectedId({ id: n.id, page: pageNum })
+                            }
+                            onUpdate={onTextUpdate}
+                            onCommit={onTextCommit}
+                            onDragStart={(e, id) => {
+                              if (isDrawMode) return;
+                              e.stopPropagation();
+                              setSelectedId({ id, page: pageNum });
+                              setIsDraggingText(true);
+                              const r = e.currentTarget.getBoundingClientRect();
+                              setDragOffset({
+                                x: e.clientX - r.left,
+                                y: e.clientY - r.top,
+                              });
+                            }}
+                          />
+                        ))}
                       </div>
                     </div>
-                  ),
-                )}
-              </div>
+                  </div>
+                ),
+              )
             )}
           </div>
         </main>

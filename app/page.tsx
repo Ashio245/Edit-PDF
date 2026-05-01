@@ -22,7 +22,7 @@ import { CSS } from "@dnd-kit/utilities";
  * CONSTANTS
  */
 const DEFAULT_EDITOR_ZOOM = 0.85;
-const MIN_EDITOR_ZOOM = 0.5;
+const MIN_EDITOR_ZOOM = 0.3;
 const MAX_EDITOR_ZOOM = 1.75;
 const ZOOM_STEP = 0.05;
 
@@ -156,7 +156,7 @@ const PdfPageCanvas = memo(
         ref={(el) => {
           canvasRefs.current[pageNum] = el;
         }}
-        style={{ display: "block" }}
+        style={{ display: "block", maxWidth: "100%", height: "auto" }}
       />
     );
   },
@@ -246,7 +246,7 @@ const TextAnnotation = memo(
     onSelect: () => void;
     onUpdate: (id: number, text: string) => void;
     onCommit: () => void;
-    onDragStart: (e: React.MouseEvent, id: number) => void;
+    onDragStart: (e: React.MouseEvent | React.TouchEvent, id: number) => void;
   }) => {
     const [localText, setLocalText] = useState(annotation.text);
 
@@ -262,6 +262,7 @@ const TextAnnotation = memo(
     return (
       <div
         onMouseDown={(e) => onDragStart(e, annotation.id)}
+        onTouchStart={(e) => onDragStart(e, annotation.id)}
         style={{
           position: "absolute",
           left: annotation.x * zoom,
@@ -273,6 +274,7 @@ const TextAnnotation = memo(
           borderRadius: "2px",
           zIndex: 15,
           pointerEvents: "auto",
+          touchAction: "none",
         }}
       >
         <textarea
@@ -281,6 +283,7 @@ const TextAnnotation = memo(
           onBlur={onCommit}
           onChange={handleChange}
           onMouseDown={(e) => e.stopPropagation()}
+          onTouchStart={(e) => e.stopPropagation()}
           style={{
             width: "100%",
             background: "transparent",
@@ -314,13 +317,14 @@ function SortableFileItem({
   onSelect,
   isSelected,
   theme,
+  isMobile,
 }: any) {
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id: file.id });
   const rowStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
-    padding: "10px 12px",
+    padding: isMobile ? "12px 14px" : "10px 12px",
     marginBottom: "6px",
     backgroundColor: isSelected ? theme.accent + "15" : theme.itemBg,
     border: `1px solid ${isSelected ? theme.accent : theme.border}`,
@@ -330,6 +334,7 @@ function SortableFileItem({
     alignItems: "center",
     gap: "10px",
     color: theme.text,
+    minHeight: isMobile ? "48px" : "auto",
   };
   return (
     <div ref={setNodeRef} style={rowStyle} onClick={onSelect}>
@@ -340,6 +345,7 @@ function SortableFileItem({
           cursor: "grab",
           display: "flex",
           color: isSelected ? theme.accent : theme.subText,
+          padding: isMobile ? "8px" : "0",
         }}
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
@@ -384,11 +390,12 @@ function SortableFileItem({
           background: "none",
           color: theme.subText,
           cursor: "pointer",
+          padding: "8px",
         }}
       >
         <svg
-          width="14"
-          height="14"
+          width="16"
+          height="16"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -461,14 +468,23 @@ function SelectedFilePreview({ file, pdfjs, theme }: any) {
         margin: "0 auto",
         display: "flex",
         flexDirection: "column",
-        gap: "32px",
+        gap: "24px",
       }}
     >
-      <div style={{ textAlign: "center" }}>
-        <h2 style={{ fontSize: "18px", fontWeight: 600, color: theme.text }}>
+      <div style={{ textAlign: "center", padding: "0 16px" }}>
+        <h2
+          style={{
+            fontSize: "16px",
+            fontWeight: 600,
+            color: theme.text,
+            margin: "0 0 4px 0",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
           {file.name}
         </h2>
-        <span style={{ fontSize: "13px", color: theme.subText }}>
+        <span style={{ fontSize: "12px", color: theme.subText }}>
           {pages.length} pages
         </span>
       </div>
@@ -480,6 +496,7 @@ function SelectedFilePreview({ file, pdfjs, theme }: any) {
             border: `1px solid ${theme.border}`,
             background: "#fff",
             lineHeight: 0,
+            margin: "0 8px",
           }}
         >
           <canvas
@@ -530,6 +547,8 @@ export default function EditPDFLite() {
   const [isDraggingText, setIsDraggingText] = useState(false);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
+  const [isMobile, setIsMobile] = useState(false);
+
   const canvasRefs = useRef<{ [key: number]: HTMLCanvasElement | null }>({});
   const drawCanvasRefs = useRef<{ [key: number]: HTMLCanvasElement | null }>(
     {},
@@ -540,6 +559,9 @@ export default function EditPDFLite() {
 
   useEffect(() => {
     setMounted(true);
+    const checkMobile = () => setIsMobile(window.innerWidth < 768);
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
     if (typeof window !== "undefined") {
       if (localStorage.getItem("pdf-studio-theme") === "dark")
         setDarkMode(true);
@@ -548,6 +570,7 @@ export default function EditPDFLite() {
       pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
       setPdfjs(pdfjsLib);
     });
+    return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
   useEffect(() => {
@@ -747,8 +770,8 @@ export default function EditPDFLite() {
     bg: darkMode ? "#1c1c1e" : "#f5f5f7",
     uiBg: darkMode ? "#2c2c2e" : "#ffffff",
     toolbarBg: darkMode
-      ? "rgba(44, 44, 46, 0.85)"
-      : "rgba(255, 255, 255, 0.85)",
+      ? "rgba(44, 44, 46, 0.95)"
+      : "rgba(255, 255, 255, 0.95)",
     sidebarBg: darkMode ? "#1c1c1e" : "#f5f5f7",
     border: darkMode ? "#3a3a3c" : "#d2d2d7",
     text: darkMode ? "#f5f5f7" : "#1d1d1f",
@@ -784,8 +807,8 @@ export default function EditPDFLite() {
       type="button"
       onClick={onClick}
       style={{
-        width: "20px",
-        height: "20px",
+        width: isMobile ? "24px" : "20px",
+        height: isMobile ? "24px" : "20px",
         backgroundColor: color === "transparent" ? "transparent" : color,
         borderRadius: "50%",
         border:
@@ -823,7 +846,8 @@ export default function EditPDFLite() {
         height: "100vh",
         backgroundColor: theme.bg,
         color: theme.text,
-        fontFamily: "sans-serif",
+        fontFamily:
+          "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
       }}
       onDragEnter={(e) => {
         e.preventDefault();
@@ -872,18 +896,35 @@ export default function EditPDFLite() {
 
       <header
         style={{
-          height: "52px",
+          minHeight: "52px",
           display: "flex",
+          flexWrap: "wrap",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "0 16px",
+          padding: "8px 16px",
           backgroundColor: theme.uiBg,
           borderBottom: `1px solid ${theme.border}`,
           zIndex: 100,
+          gap: "10px",
         }}
       >
-        <div style={{ display: "flex", gap: "16px", alignItems: "center" }}>
-          <div style={{ fontWeight: 600 }}>PDF Studio</div>
+        <div
+          style={{
+            display: "flex",
+            gap: "12px",
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <div
+            style={{
+              fontWeight: 700,
+              fontSize: "15px",
+              letterSpacing: "-0.02em",
+            }}
+          >
+            PDF Studio
+          </div>
           {pdfDoc && (
             <div
               style={{
@@ -907,6 +948,7 @@ export default function EditPDFLite() {
                   background: isDrawMode ? theme.accent : "transparent",
                   color: isDrawMode ? "#fff" : theme.text,
                   cursor: "pointer",
+                  fontWeight: 500,
                 }}
               >
                 Markup
@@ -925,6 +967,7 @@ export default function EditPDFLite() {
                   background: isAddTextMode ? theme.accent : "transparent",
                   color: isAddTextMode ? "#fff" : theme.text,
                   cursor: "pointer",
+                  fontWeight: 500,
                 }}
               >
                 Text
@@ -949,19 +992,30 @@ export default function EditPDFLite() {
               border: `1px solid ${theme.border}`,
               fontSize: "12px",
               cursor: "pointer",
+              fontWeight: 500,
+              minHeight: isMobile ? "36px" : "auto",
+              display: "flex",
+              alignItems: "center",
             }}
           >
             Add Files
           </label>
         </div>
-        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+        <div
+          style={{
+            display: "flex",
+            gap: "10px",
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
           {pdfDoc && (
             <div
               style={{
                 display: "flex",
-                gap: "8px",
+                gap: "4px",
                 borderRight: `1px solid ${theme.border}`,
-                paddingRight: "12px",
+                paddingRight: "10px",
               }}
             >
               <button
@@ -982,9 +1036,20 @@ export default function EditPDFLite() {
                   background: "none",
                   color: theme.text,
                   cursor: "pointer",
+                  padding: "6px",
                 }}
               >
-                Undo
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M9 14L4 9l5-5" />
+                  <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H13" />
+                </svg>
               </button>
               <button
                 disabled={future.length === 0}
@@ -1004,9 +1069,20 @@ export default function EditPDFLite() {
                   background: "none",
                   color: theme.text,
                   cursor: "pointer",
+                  padding: "6px",
                 }}
               >
-                Redo
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M15 14l5-5-5-5" />
+                  <path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H11" />
+                </svg>
               </button>
             </div>
           )}
@@ -1017,7 +1093,7 @@ export default function EditPDFLite() {
                 alignItems: "center",
                 background: darkMode ? "#3a3a3c" : "#f2f2f7",
                 borderRadius: "6px",
-                padding: "2px 8px",
+                padding: "2px 6px",
               }}
             >
               <button
@@ -1029,6 +1105,8 @@ export default function EditPDFLite() {
                   background: "none",
                   color: theme.text,
                   cursor: "pointer",
+                  fontSize: "18px",
+                  width: "28px",
                 }}
               >
                 -
@@ -1036,8 +1114,9 @@ export default function EditPDFLite() {
               <span
                 style={{
                   fontSize: "11px",
-                  minWidth: "40px",
+                  minWidth: "35px",
                   textAlign: "center",
+                  fontWeight: 600,
                 }}
               >
                 {Math.round(zoom * 100)}%
@@ -1051,6 +1130,8 @@ export default function EditPDFLite() {
                   background: "none",
                   color: theme.text,
                   cursor: "pointer",
+                  fontSize: "18px",
+                  width: "28px",
                 }}
               >
                 +
@@ -1070,6 +1151,8 @@ export default function EditPDFLite() {
               background: "none",
               color: theme.text,
               cursor: "pointer",
+              fontSize: "12px",
+              fontWeight: 500,
             }}
           >
             {darkMode ? "Light" : "Dark"}
@@ -1078,12 +1161,14 @@ export default function EditPDFLite() {
             <button
               onClick={downloadPDF}
               style={{
-                padding: "6px 12px",
+                padding: "7px 14px",
                 background: theme.accent,
                 color: "#fff",
                 border: "none",
-                borderRadius: "6px",
+                borderRadius: "8px",
                 cursor: "pointer",
+                fontWeight: 600,
+                fontSize: "13px",
               }}
             >
               Export
@@ -1092,26 +1177,37 @@ export default function EditPDFLite() {
         </div>
       </header>
 
-      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+      <div
+        style={{
+          display: "flex",
+          flex: 1,
+          overflow: "hidden",
+          flexDirection: isMobile ? "column" : "row",
+        }}
+      >
         <aside
           style={{
-            width: "260px",
-            borderRight: `1px solid ${theme.border}`,
+            width: isMobile ? "100%" : "260px",
+            maxHeight: isMobile ? "180px" : "none",
+            borderRight: isMobile ? "none" : `1px solid ${theme.border}`,
+            borderBottom: isMobile ? `1px solid ${theme.border}` : "none",
             backgroundColor: theme.sidebarBg,
-            padding: "16px",
+            padding: "12px 16px",
             display: "flex",
             flexDirection: "column",
+            flexShrink: 0,
           }}
         >
           <div
             style={{
-              fontSize: "11px",
+              fontSize: "10px",
               fontWeight: 700,
               opacity: 0.6,
-              marginBottom: "12px",
+              marginBottom: "8px",
+              textTransform: "uppercase",
             }}
           >
-            QUEUE
+            Queue
           </div>
           <div style={{ flex: 1, overflowY: "auto" }}>
             <DndContext
@@ -1120,12 +1216,9 @@ export default function EditPDFLite() {
               onDragEnd={(e) => {
                 const over = e.over;
                 if (!over) return;
-
                 const activeId = e.active.id;
                 const overId = over.id;
-
                 if (activeId === overId) return;
-
                 setUploadedFiles((f) =>
                   arrayMove(
                     f,
@@ -1150,6 +1243,7 @@ export default function EditPDFLite() {
                       setUploadedFiles((p) => p.filter((x) => x.id !== f.id))
                     }
                     theme={theme}
+                    isMobile={isMobile}
                   />
                 ))}
               </SortableContext>
@@ -1159,14 +1253,15 @@ export default function EditPDFLite() {
             onClick={mergeAndLoad}
             disabled={uploadedFiles.length === 0 || loading}
             style={{
-              marginTop: "16px",
-              padding: "12px",
+              marginTop: "12px",
+              padding: "10px",
               background: theme.text,
               color: theme.uiBg,
               border: "none",
               borderRadius: "8px",
               fontWeight: 600,
               cursor: "pointer",
+              fontSize: "13px",
             }}
           >
             {loading ? "..." : "Merge & Edit"}
@@ -1185,24 +1280,34 @@ export default function EditPDFLite() {
             <div
               style={{
                 position: "absolute",
-                top: "20px",
-                left: "50%",
-                transform: "translateX(-50%)",
+                top: "12px",
+                left: isMobile ? "12px" : "50%",
+                right: isMobile ? "12px" : "auto",
+                transform: isMobile ? "none" : "translateX(-50%)",
                 zIndex: 1000,
                 background: theme.toolbarBg,
-                backdropFilter: "blur(10px)",
+                backdropFilter: "blur(20px)",
                 border: `1px solid ${theme.border}`,
                 borderRadius: "12px",
-                padding: "8px 16px",
+                padding: "10px 12px",
                 display: "flex",
-                gap: "16px",
+                flexWrap: "wrap",
+                rowGap: 8,
+                columnGap: 12,
                 alignItems: "center",
                 boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
+                maxWidth: isMobile ? "none" : "calc(100% - 40px)",
+                width: isMobile ? "calc(100% - 24px)" : "auto",
               }}
             >
               {isDrawMode && !selectedNoteObj && (
                 <div
-                  style={{ display: "flex", gap: "12px", alignItems: "center" }}
+                  style={{
+                    display: "flex",
+                    gap: "12px",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                  }}
                 >
                   <div style={{ display: "flex", gap: "6px" }}>
                     {PRESET_COLORS.slice(0, 5).map((c) => (
@@ -1227,7 +1332,7 @@ export default function EditPDFLite() {
                     max="15"
                     value={strokeWidth}
                     onChange={(e) => setStrokeWidth(parseInt(e.target.value))}
-                    style={{ width: "60px" }}
+                    style={{ width: isMobile ? "80px" : "60px" }}
                   />
                   <span
                     style={{ fontSize: "11px", fontWeight: 600, width: "30px" }}
@@ -1241,232 +1346,303 @@ export default function EditPDFLite() {
                 <div
                   style={{
                     display: "flex",
-                    gap: "12px",
+                    gap: 8,
                     alignItems: "center",
                     flexWrap: "wrap",
                   }}
                 >
-                  <select
-                    value={selectedNoteObj.fontFamily}
-                    onChange={(e) => {
-                      takeSnapshot();
-                      updateNote(selectedId!.page, selectedId!.id, {
-                        fontFamily: e.target.value,
-                      });
-                    }}
-                    style={{
-                      fontSize: "12px",
-                      padding: "4px",
-                      borderRadius: "4px",
-                    }}
-                  >
-                    <option value="Helvetica">Sans</option>
-                    <option value="TimesRoman">Serif</option>
-                  </select>
-                  <input
-                    type="number"
-                    value={selectedNoteObj.fontSize}
-                    onChange={(e) => {
-                      takeSnapshot();
-                      updateNote(selectedId!.page, selectedId!.id, {
-                        fontSize: parseInt(e.target.value),
-                      });
-                    }}
-                    style={{ width: "40px", fontSize: "12px", padding: "4px" }}
-                  />
                   <div
                     style={{
                       display: "flex",
-                      border: `1px solid ${theme.border}`,
-                      borderRadius: "6px",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <button
-                      onClick={() => {
-                        takeSnapshot();
-                        updateNote(selectedId!.page, selectedId!.id, {
-                          isBold: !selectedNoteObj.isBold,
-                        });
-                      }}
-                      style={{
-                        padding: "4px 8px",
-                        background: selectedNoteObj.isBold
-                          ? theme.border
-                          : "transparent",
-                        border: "none",
-                        fontSize: "12px",
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      B
-                    </button>
-                    <button
-                      onClick={() => {
-                        takeSnapshot();
-                        updateNote(selectedId!.page, selectedId!.id, {
-                          isItalic: !selectedNoteObj.isItalic,
-                        });
-                      }}
-                      style={{
-                        padding: "4px 8px",
-                        background: selectedNoteObj.isItalic
-                          ? theme.border
-                          : "transparent",
-                        border: "none",
-                        fontSize: "12px",
-                        fontStyle: "italic",
-                        cursor: "pointer",
-                      }}
-                    >
-                      I
-                    </button>
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
+                      gap: 8,
                       alignItems: "center",
-                      gap: "6px",
+                      flexWrap: "wrap",
                     }}
                   >
-                    <span style={{ fontSize: "10px", fontWeight: 700 }}>W</span>
-                    <input
-                      type="range"
-                      min="50"
-                      max="600"
-                      value={selectedNoteObj.width}
+                    <select
+                      value={selectedNoteObj.fontFamily}
                       onChange={(e) => {
                         takeSnapshot();
                         updateNote(selectedId!.page, selectedId!.id, {
-                          width: parseInt(e.target.value),
+                          fontFamily: e.target.value,
                         });
                       }}
-                      style={{ width: "60px" }}
-                    />
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: "4px",
-                      alignItems: "center",
-                    }}
-                  >
-                    <span style={{ fontSize: "10px", fontWeight: 700 }}>T</span>
-                    {PRESET_COLORS.slice(0, 3).map((c) => (
-                      <ColorSwatch
-                        key={c}
-                        color={c}
-                        active={selectedNoteObj.color === c}
-                        onClick={() => {
-                          takeSnapshot();
-                          updateNote(selectedId!.page, selectedId!.id, {
-                            color: c,
-                          });
-                        }}
-                      />
-                    ))}
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: "4px",
-                      alignItems: "center",
-                    }}
-                  >
-                    <span style={{ fontSize: "10px", fontWeight: 700 }}>F</span>
-                    <ColorSwatch
-                      color="transparent"
-                      active={selectedNoteObj.bgColor === "transparent"}
-                      onClick={() => {
+                      style={{
+                        fontSize: "12px",
+                        padding: "4px",
+                        borderRadius: "4px",
+                        maxWidth: "80px",
+                      }}
+                    >
+                      <option value="Helvetica">Sans</option>
+                      <option value="TimesRoman">Serif</option>
+                    </select>
+                    <input
+                      type="number"
+                      value={
+                        Number.isFinite(selectedNoteObj.fontSize)
+                          ? selectedNoteObj.fontSize
+                          : ""
+                      }
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") return;
+                        const nextFontSize = Number(raw);
+                        if (!Number.isFinite(nextFontSize)) return;
                         takeSnapshot();
                         updateNote(selectedId!.page, selectedId!.id, {
-                          bgColor: "transparent",
+                          fontSize: nextFontSize,
                         });
                       }}
+                      style={{
+                        width: isMobile ? "50px" : "40px",
+                        fontSize: "12px",
+                        padding: "4px",
+                      }}
                     />
-                    {PRESET_COLORS.slice(1, 4).map((c) => (
-                      <ColorSwatch
-                        key={c}
-                        color={c}
-                        active={selectedNoteObj.bgColor === c}
+                    <div
+                      style={{
+                        display: "flex",
+                        border: `1px solid ${theme.border}`,
+                        borderRadius: "6px",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <button
                         onClick={() => {
                           takeSnapshot();
                           updateNote(selectedId!.page, selectedId!.id, {
-                            bgColor: c,
+                            isBold: !selectedNoteObj.isBold,
+                          });
+                        }}
+                        style={{
+                          padding: "4px 8px",
+                          background: selectedNoteObj.isBold
+                            ? theme.border
+                            : "transparent",
+                          border: "none",
+                          fontSize: "12px",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        B
+                      </button>
+                      <button
+                        onClick={() => {
+                          takeSnapshot();
+                          updateNote(selectedId!.page, selectedId!.id, {
+                            isItalic: !selectedNoteObj.isItalic,
+                          });
+                        }}
+                        style={{
+                          padding: "4px 8px",
+                          background: selectedNoteObj.isItalic
+                            ? theme.border
+                            : "transparent",
+                          border: "none",
+                          fontSize: "12px",
+                          fontStyle: "italic",
+                          cursor: "pointer",
+                        }}
+                      >
+                        I
+                      </button>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "4px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: "10px",
+                          fontWeight: 700,
+                          opacity: 0.6,
+                        }}
+                      >
+                        W
+                      </span>
+                      <input
+                        type="range"
+                        min="50"
+                        max="600"
+                        value={selectedNoteObj.width}
+                        onChange={(e) => {
+                          takeSnapshot();
+                          updateNote(selectedId!.page, selectedId!.id, {
+                            width: parseInt(e.target.value),
+                          });
+                        }}
+                        style={{ width: isMobile ? "60px" : "50px" }}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "4px",
+                        alignItems: "center",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: "10px",
+                          fontWeight: 700,
+                          opacity: 0.6,
+                        }}
+                      >
+                        T
+                      </span>
+                      {PRESET_COLORS.slice(0, 3).map((c) => (
+                        <ColorSwatch
+                          key={c}
+                          color={c}
+                          active={selectedNoteObj.color === c}
+                          onClick={() => {
+                            takeSnapshot();
+                            updateNote(selectedId!.page, selectedId!.id, {
+                              color: c,
+                            });
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "4px",
+                        alignItems: "center",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: "10px",
+                          fontWeight: 700,
+                          opacity: 0.6,
+                        }}
+                      >
+                        F
+                      </span>
+                      <ColorSwatch
+                        color="transparent"
+                        active={selectedNoteObj.bgColor === "transparent"}
+                        onClick={() => {
+                          takeSnapshot();
+                          updateNote(selectedId!.page, selectedId!.id, {
+                            bgColor: "transparent",
                           });
                         }}
                       />
-                    ))}
+                      {PRESET_COLORS.slice(1, 3).map((c) => (
+                        <ColorSwatch
+                          key={c}
+                          color={c}
+                          active={selectedNoteObj.bgColor === c}
+                          onClick={() => {
+                            takeSnapshot();
+                            updateNote(selectedId!.page, selectedId!.id, {
+                              bgColor: c,
+                            });
+                          }}
+                        />
+                      ))}
+                    </div>
                   </div>
-                  <div style={{ display: "flex", gap: "2px" }}>
-                    <button
-                      onClick={() => nudge(0, -2)}
-                      style={{
-                        border: "none",
-                        background: "none",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                      }}
-                    >
-                      ↑
-                    </button>
-                    <button
-                      onClick={() => nudge(0, 2)}
-                      style={{
-                        border: "none",
-                        background: "none",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                      }}
-                    >
-                      ↓
-                    </button>
-                    <button
-                      onClick={() => nudge(-2, 0)}
-                      style={{
-                        border: "none",
-                        background: "none",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                      }}
-                    >
-                      ←
-                    </button>
-                    <button
-                      onClick={() => nudge(2, 0)}
-                      style={{
-                        border: "none",
-                        background: "none",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                      }}
-                    >
-                      →
-                    </button>
-                  </div>
-                  <button
-                    onClick={() => {
-                      takeSnapshot();
-                      setAnnotations((p) => ({
-                        ...p,
-                        [selectedId!.page]: p[selectedId!.page].filter(
-                          (n) => n.id !== selectedId!.id,
-                        ),
-                      }));
-                      setSelectedId(null);
-                    }}
+
+                  <div
                     style={{
-                      color: "red",
-                      border: "none",
-                      background: "none",
-                      cursor: "pointer",
-                      fontSize: "12px",
-                      fontWeight: 600,
+                      display: "flex",
+                      gap: "4px",
+                      alignItems: "center",
+                      flexWrap: "wrap",
                     }}
                   >
-                    Delete
-                  </button>
+                    <div style={{ display: "flex", gap: "2px" }}>
+                      <button
+                        onClick={() => nudge(0, -2)}
+                        style={{
+                          border: "none",
+                          background: "none",
+                          cursor: "pointer",
+                          fontSize: "14px",
+                          padding: 4,
+                        }}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        onClick={() => nudge(0, 2)}
+                        style={{
+                          border: "none",
+                          background: "none",
+                          cursor: "pointer",
+                          fontSize: "14px",
+                          padding: 4,
+                        }}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        onClick={() => nudge(-2, 0)}
+                        style={{
+                          border: "none",
+                          background: "none",
+                          cursor: "pointer",
+                          fontSize: "14px",
+                          padding: 4,
+                        }}
+                      >
+                        ←
+                      </button>
+                      <button
+                        onClick={() => nudge(2, 0)}
+                        style={{
+                          border: "none",
+                          background: "none",
+                          cursor: "pointer",
+                          fontSize: "14px",
+                          padding: 4,
+                        }}
+                      >
+                        →
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => {
+                        takeSnapshot();
+                        setAnnotations((p) => ({
+                          ...p,
+                          [selectedId!.page]: p[selectedId!.page].filter(
+                            (n) => n.id !== selectedId!.id,
+                          ),
+                        }));
+                        setSelectedId(null);
+                      }}
+                      style={{
+                        color: "red",
+                        border: "none",
+                        background: "none",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        paddingLeft: 8,
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -1474,7 +1650,13 @@ export default function EditPDFLite() {
 
           <div
             style={{
-              padding: pdfDoc ? "80px 40px" : "40px",
+              padding: pdfDoc
+                ? isMobile
+                  ? "20px 8px"
+                  : "80px 40px"
+                : isMobile
+                  ? "20px 8px"
+                  : "40px",
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
@@ -1488,15 +1670,16 @@ export default function EditPDFLite() {
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
-                    marginTop: "100px",
+                    marginTop: isMobile ? "40px" : "100px",
                     opacity: 0.5,
+                    textAlign: "center",
                   }}
                 >
-                  <div style={{ fontSize: "17px", fontWeight: 600 }}>
+                  <div style={{ fontSize: "16px", fontWeight: 600 }}>
                     No documents selected
                   </div>
-                  <div style={{ fontSize: "14px" }}>
-                    Drag PDFs or Images here
+                  <div style={{ fontSize: "13px" }}>
+                    Add PDFs or Images to begin
                   </div>
                 </div>
               ) : (
@@ -1517,23 +1700,21 @@ export default function EditPDFLite() {
                     key={pageNum}
                     style={{
                       position: "relative",
-                      marginBottom: "40px",
-                      touchAction: "none",
+                      marginBottom: isMobile ? "20px" : "40px",
+                      touchAction: isDrawMode ? "none" : "auto",
                     }}
                     onMouseMove={(e) => {
                       const pdfCanvas = canvasRefs.current[pageNum];
                       if (!pdfCanvas) return;
-
                       if (isDrawing && isDrawMode) {
                         const rect = pdfCanvas.getBoundingClientRect();
                         setStrokes((prev) => {
                           const s = [...(prev[pageNum] || [])];
-                          if (s.length) {
+                          if (s.length)
                             s[s.length - 1].points.push({
                               x: (e.clientX - rect.left) / zoom,
                               y: (e.clientY - rect.top) / zoom,
                             });
-                          }
                           return { ...prev, [pageNum]: s };
                         });
                       }
@@ -1545,19 +1726,39 @@ export default function EditPDFLite() {
                         });
                       }
                     }}
+                    onTouchMove={(e) => {
+                      if (!isDrawing || !isDrawMode) return;
+                      const pdfCanvas = canvasRefs.current[pageNum];
+                      if (!pdfCanvas) return;
+                      const touch = e.touches[0];
+                      const rect = pdfCanvas.getBoundingClientRect();
+                      setStrokes((prev) => {
+                        const s = [...(prev[pageNum] || [])];
+                        if (s.length)
+                          s[s.length - 1].points.push({
+                            x: (touch.clientX - rect.left) / zoom,
+                            y: (touch.clientY - rect.top) / zoom,
+                          });
+                        return { ...prev, [pageNum]: s };
+                      });
+                    }}
                     onMouseUp={() => {
                       if (isDrawing || isDraggingText) takeSnapshot();
                       setIsDrawing(false);
                       setIsDraggingText(false);
                     }}
+                    onTouchEnd={() => {
+                      if (isDrawing) {
+                        takeSnapshot();
+                        setIsDrawing(false);
+                      }
+                    }}
                     onMouseDown={(e) => {
                       const pdfCanvas = canvasRefs.current[pageNum];
                       if (!pdfCanvas) return;
-
                       const rect = pdfCanvas.getBoundingClientRect();
                       const x = (e.clientX - rect.left) / zoom;
                       const y = (e.clientY - rect.top) / zoom;
-
                       if (isDrawMode) {
                         takeSnapshot();
                         setIsDrawing(true);
@@ -1599,17 +1800,40 @@ export default function EditPDFLite() {
                         setIsAddTextMode(false);
                       }
                     }}
+                    onTouchStart={(e) => {
+                      if (!isDrawMode) return;
+                      const pdfCanvas = canvasRefs.current[pageNum];
+                      if (!pdfCanvas) return;
+                      const touch = e.touches[0];
+                      const rect = pdfCanvas.getBoundingClientRect();
+                      const x = (touch.clientX - rect.left) / zoom;
+                      const y = (touch.clientY - rect.top) / zoom;
+                      takeSnapshot();
+                      setIsDrawing(true);
+                      setStrokes((p) => ({
+                        ...p,
+                        [pageNum]: [
+                          ...(p[pageNum] || []),
+                          {
+                            points: [{ x, y }],
+                            color: strokeColor,
+                            width: strokeWidth,
+                          },
+                        ],
+                      }));
+                    }}
                   >
                     <div
                       style={{
                         position: "absolute",
-                        top: "-25px",
-                        fontSize: "11px",
+                        top: "-22px",
+                        fontSize: "10px",
                         fontWeight: 700,
                         opacity: 0.5,
+                        textTransform: "uppercase",
                       }}
                     >
-                      PAGE {pageNum}
+                      P. {pageNum}
                     </div>
                     <div
                       style={{
@@ -1655,15 +1879,21 @@ export default function EditPDFLite() {
                             }
                             onUpdate={onTextUpdate}
                             onCommit={onTextCommit}
-                            onDragStart={(e, id) => {
+                            onDragStart={(e: any, id: number) => {
                               if (isDrawMode) return;
                               e.stopPropagation();
                               setSelectedId({ id, page: pageNum });
                               setIsDraggingText(true);
                               const r = e.currentTarget.getBoundingClientRect();
+                              const clientX = e.type.startsWith("touch")
+                                ? e.touches[0].clientX
+                                : e.clientX;
+                              const clientY = e.type.startsWith("touch")
+                                ? e.touches[0].clientY
+                                : e.clientY;
                               setDragOffset({
-                                x: e.clientX - r.left,
-                                y: e.clientY - r.top,
+                                x: clientX - r.left,
+                                y: clientY - r.top,
                               });
                             }}
                           />

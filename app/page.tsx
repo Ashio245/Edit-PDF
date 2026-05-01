@@ -284,6 +284,10 @@ export default function EditPDFLite() {
   const [zoom, setZoom] = useState(1.0);
   const [darkMode, setDarkMode] = useState<boolean>(false);
 
+  // Drag and Drop state
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const dragCounter = useRef(0);
+
   const [uploadedFiles, setUploadedFiles] = useState<FileItem[]>([]);
   const [isDrawMode, setIsDrawMode] = useState(false);
   const [isAddTextMode, setIsAddTextMode] = useState(false);
@@ -339,7 +343,67 @@ export default function EditPDFLite() {
   };
 
   /**
-   * REVISED HISTORY LOGIC
+   * FILE HANDLING HELPER
+   */
+  const handleFileProcess = useCallback(async (files: FileList | File[]) => {
+    const pdfFiles = Array.from(files).filter(
+      (f) =>
+        f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"),
+    );
+    if (pdfFiles.length === 0) return;
+
+    const items: FileItem[] = [];
+    for (let i = 0; i < pdfFiles.length; i++) {
+      const b = await pdfFiles[i].arrayBuffer();
+      items.push({
+        id: `f-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 9)}`,
+        name: pdfFiles[i].name,
+        buffer: b,
+      });
+    }
+    setUploadedFiles((prev) => [...prev, ...items]);
+  }, []);
+
+  /**
+   * DRAG AND DROP EVENTS
+   */
+  const onDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current++;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDraggingOver(true);
+    }
+  };
+
+  const onDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current--;
+    if (dragCounter.current === 0) {
+      setIsDraggingOver(false);
+    }
+  };
+
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const onDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+    dragCounter.current = 0;
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      await handleFileProcess(e.dataTransfer.files);
+      e.dataTransfer.clearData();
+    }
+  };
+
+  /**
+   * HISTORY LOGIC
    */
   const takeSnapshot = useCallback(() => {
     setPast((prev) => [...prev, deepCloneState({ strokes, annotations })]);
@@ -561,7 +625,7 @@ export default function EditPDFLite() {
     if (over && active.id !== over.id) {
       setUploadedFiles((items) => {
         const oldIndex = items.findIndex((it) => it.id === active.id);
-        const newIndex = items.findIndex((it) => it.id === over.id);
+        const newIndex = items.findIndex((it) => i.id === over.id);
         return arrayMove(items, oldIndex, newIndex);
       });
     }
@@ -579,6 +643,9 @@ export default function EditPDFLite() {
     subText: darkMode ? "#86868b" : "#6e6e73",
     itemBg: darkMode ? "#2c2c2e" : "#ffffff",
     accent: "#0071e3",
+    dropOverlay: darkMode
+      ? "rgba(0, 113, 227, 0.15)"
+      : "rgba(0, 113, 227, 0.08)",
   };
 
   const toolBtnStyle = (active: boolean) => ({
@@ -643,7 +710,61 @@ export default function EditPDFLite() {
         fontFamily:
           '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
       }}
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
     >
+      {/* DRAG OVERLAY */}
+      {isDraggingOver && !pdfDoc && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            zIndex: 9999,
+            backgroundColor: theme.dropOverlay,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            backdropFilter: "blur(4px)",
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              padding: "40px 60px",
+              borderRadius: "20px",
+              border: `2px dashed ${theme.accent}`,
+              backgroundColor: theme.uiBg,
+              boxShadow: "0 20px 40px rgba(0,0,0,0.1)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "16px",
+            }}
+          >
+            <svg
+              width="48"
+              height="48"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke={theme.accent}
+              strokeWidth="1.5"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            <div
+              style={{ fontSize: "20px", fontWeight: 600, color: theme.text }}
+            >
+              Drop to add PDFs
+            </div>
+          </div>
+        </div>
+      )}
+
       <header
         style={{
           display: "flex",
@@ -698,20 +819,9 @@ export default function EditPDFLite() {
             multiple
             hidden
             accept="application/pdf"
-            onChange={async (e) => {
-              const files = e.target.files;
-              if (!files) return;
-              const items: FileItem[] = [];
-              for (let i = 0; i < files.length; i++) {
-                const b = await files[i].arrayBuffer();
-                items.push({
-                  id: `f-${Date.now()}-${i}`,
-                  name: files[i].name,
-                  buffer: b,
-                });
-              }
-              setUploadedFiles((prev) => [...prev, ...items]);
-            }}
+            onChange={(e) =>
+              e.target.files && handleFileProcess(e.target.files)
+            }
           />
           <label htmlFor="pdf-upload-input" style={toolBtnStyle(false) as any}>
             Add Files
@@ -1263,6 +1373,15 @@ export default function EditPDFLite() {
                       alignItems: "center",
                       justifyContent: "center",
                       color: theme.subText,
+                      border: isDraggingOver
+                        ? `2px dashed ${theme.accent}`
+                        : "2px dashed transparent",
+                      borderRadius: "24px",
+                      margin: "20px",
+                      transition: "all 0.2s ease",
+                      backgroundColor: isDraggingOver
+                        ? theme.dropOverlay
+                        : "transparent",
                     }}
                   >
                     <div
@@ -1299,10 +1418,10 @@ export default function EditPDFLite() {
                         marginBottom: "4px",
                       }}
                     >
-                      No documents selected
+                      {isDraggingOver ? "Drop to add" : "No documents selected"}
                     </div>
                     <div style={{ fontSize: "14px" }}>
-                      Upload PDFs to start your workspace
+                      Drag and drop PDF files or use the Add button
                     </div>
                   </div>
                 ) : (
@@ -1373,6 +1492,7 @@ export default function EditPDFLite() {
                       }
                     }}
                     onMouseUp={() => {
+                      if (isDrawing || isDraggingText) takeSnapshot();
                       setIsDrawing(false);
                       setIsDraggingText(false);
                     }}

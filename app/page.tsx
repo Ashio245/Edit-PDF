@@ -186,7 +186,6 @@ const StrokeCanvas = memo(
       const canvas = drawCanvasRefs.current[pageNum];
       if (!canvas || !pdfCanvas) return;
 
-      // Sync dimensions to match PDF canvas exactly
       canvas.width = pdfCanvas.width;
       canvas.height = pdfCanvas.height;
 
@@ -898,6 +897,7 @@ export default function EditPDFLite() {
                 onClick={() => {
                   setIsDrawMode(true);
                   setIsAddTextMode(false);
+                  setSelectedId(null);
                 }}
                 style={{
                   padding: "6px 12px",
@@ -915,6 +915,7 @@ export default function EditPDFLite() {
                 onClick={() => {
                   setIsAddTextMode(true);
                   setIsDrawMode(false);
+                  setSelectedId(null);
                 }}
                 style={{
                   padding: "6px 12px",
@@ -1117,14 +1118,21 @@ export default function EditPDFLite() {
               sensors={sensors}
               collisionDetection={closestCenter}
               onDragEnd={(e) => {
-                if (e.over && e.active.id !== e.over.id)
-                  setUploadedFiles((f) =>
-                    arrayMove(
-                      f,
-                      f.findIndex((x) => x.id === e.active.id),
-                      f.findIndex((x) => x.id === e.over.id),
-                    ),
-                  );
+                const over = e.over;
+                if (!over) return;
+
+                const activeId = e.active.id;
+                const overId = over.id;
+
+                if (activeId === overId) return;
+
+                setUploadedFiles((f) =>
+                  arrayMove(
+                    f,
+                    f.findIndex((x) => x.id === activeId),
+                    f.findIndex((x) => x.id === overId),
+                  ),
+                );
               }}
             >
               <SortableContext
